@@ -4,13 +4,9 @@ Database Session
 
 PostgreSQL connection helpers.
 ``get_postgres_db()`` for agent storage backed by Postgres.
-``create_knowledge()`` for agent knowledge backed by PgVector.
 """
 
 from agno.db.postgres import PostgresDb
-from agno.knowledge import Knowledge
-from agno.knowledge.embedder.openai import OpenAIEmbedder
-from agno.vectordb.pgvector import PgVector, SearchType
 
 from db.url import db_url
 
