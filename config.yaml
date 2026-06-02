@@ -1,0 +1,5 @@
+available_models:
+  - openrouter:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
+  - google:gemini-2.5-flash
+  - openai:gpt-4o
+  - anthropic:claude-3-5-sonnet-20241022
