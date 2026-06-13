@@ -17,3 +17,5 @@ wheels/
 
 # Notebooks
 *.ipynb
+
+node_modules/
