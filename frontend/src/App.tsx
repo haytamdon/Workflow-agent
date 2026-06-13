@@ -7,11 +7,13 @@ import {
   Download,
   ExternalLink,
   FileJson,
+  HelpCircle,
   Loader2,
   Play,
   RefreshCw,
   Send,
   Settings2,
+  Sliders,
   Square,
   Wand2,
   XCircle,
@@ -32,8 +34,10 @@ import {
 import {
   extractAuditMarkdown,
   extractWorkflowJson,
+  extractQuestions,
   type N8nWorkflow,
   type WorkflowExtraction,
+  type ParameterQuestion,
 } from "./lib/results";
 import { readStoredValue, writeStoredValue } from "./lib/storage";
 
@@ -47,6 +51,7 @@ const STAGES = [
   { label: "Workflow Designer", token: "workflow designer" },
   { label: "Workflow Creator", token: "workflow creator" },
   { label: "Workflow Validator", token: "workflow validator" },
+  { label: "Parameter Detector", token: "parameter detector" },
 ];
 
 const EXAMPLES = [
@@ -81,7 +86,7 @@ const EXAMPLES = [
 ];
 
 type RunState = "idle" | "running" | "success" | "error";
-type ResultTab = "json" | "audit" | "raw";
+type ResultTab = "json" | "questions" | "audit" | "raw";
 
 function createSessionId(): string {
   return `workflow-ui-${Date.now().toString(36)}`;
@@ -120,6 +125,9 @@ function getStageIndexFromText(text: string, fallback: number): number {
   }
   if (lower.includes("validation") || lower.includes("audit")) {
     return Math.max(fallback, 3);
+  }
+  if (lower.includes("parameter") || lower.includes("question")) {
+    return Math.max(fallback, 4);
   }
   return fallback;
 }
@@ -176,12 +184,40 @@ export default function App() {
   const [createdWorkflow, setCreatedWorkflow] =
     useState<CreatedN8nWorkflow | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
   const abortRef = useRef<AbortController | null>(null);
 
   const workflow = extraction.workflow;
+  const questions = useMemo(() => {
+    return extractQuestions(rawOutput);
+  }, [rawOutput]);
+
+  const modifiedWorkflow = useMemo(() => {
+    if (!workflow) return null;
+    const cloned = JSON.parse(JSON.stringify(workflow));
+    questions.forEach((q) => {
+      const answerVal = answers[q.id];
+      if (answerVal !== undefined && answerVal.trim() !== "") {
+        const node = cloned.nodes.find((n: any) => n.name === q.nodeName);
+        if (node) {
+          if (!node.parameters) {
+            node.parameters = {};
+          }
+          node.parameters[q.parameterName] = answerVal;
+        }
+      }
+    });
+    return cloned;
+  }, [workflow, questions, answers]);
+
+  const displayJson = useMemo(() => {
+    if (!modifiedWorkflow) return "";
+    return JSON.stringify(modifiedWorkflow, null, 2);
+  }, [modifiedWorkflow]);
+
   const createState = useMemo(
-    () => getCreateWorkflowState(n8nStatus, workflow, isCreating),
-    [isCreating, n8nStatus, workflow],
+    () => getCreateWorkflowState(n8nStatus, modifiedWorkflow, isCreating),
+    [isCreating, n8nStatus, modifiedWorkflow],
   );
 
   useEffect(() => {
@@ -241,6 +277,7 @@ export default function App() {
     setRawOutput("");
     setAuditMarkdown("");
     setExtraction(extractWorkflowJson(""));
+    setAnswers({});
     setErrorMessage("");
     setCreatedWorkflow(null);
     setCopyState("idle");
@@ -294,11 +331,11 @@ export default function App() {
   }
 
   async function handleCopyJson() {
-    if (!extraction.formattedJson) {
+    if (!displayJson) {
       return;
     }
     try {
-      await navigator.clipboard.writeText(extraction.formattedJson);
+      await navigator.clipboard.writeText(displayJson);
       setCopyState("copied");
       window.setTimeout(() => setCopyState("idle"), 1400);
     } catch {
@@ -308,10 +345,10 @@ export default function App() {
   }
 
   function handleDownloadJson() {
-    if (!extraction.formattedJson) {
+    if (!displayJson) {
       return;
     }
-    const blob = new Blob([extraction.formattedJson], {
+    const blob = new Blob([displayJson], {
       type: "application/json;charset=utf-8",
     });
     const url = URL.createObjectURL(blob);
@@ -325,7 +362,7 @@ export default function App() {
   }
 
   async function handleCreateInN8n() {
-    if (!workflow || createState.disabled) {
+    if (!modifiedWorkflow || createState.disabled) {
       return;
     }
 
@@ -336,7 +373,7 @@ export default function App() {
         agentosBaseUrl,
         token,
         name: workflowName.trim() || "Generated workflow",
-        workflow,
+        workflow: modifiedWorkflow,
         activate: activateWorkflow,
       });
       setCreatedWorkflow(created);
@@ -596,6 +633,14 @@ export default function App() {
                 JSON
               </button>
               <button
+                className={activeTab === "questions" ? "active" : ""}
+                type="button"
+                onClick={() => setActiveTab("questions")}
+              >
+                <HelpCircle size={16} />
+                Questions
+              </button>
+              <button
                 className={activeTab === "audit" ? "active" : ""}
                 type="button"
                 onClick={() => setActiveTab("audit")}
@@ -617,7 +662,7 @@ export default function App() {
                 className="icon-button"
                 type="button"
                 title="Copy JSON"
-                disabled={!extraction.formattedJson}
+                disabled={!displayJson}
                 onClick={handleCopyJson}
               >
                 {copyState === "copied" ? <CheckCircle2 size={17} /> : <Clipboard size={17} />}
@@ -626,7 +671,7 @@ export default function App() {
                 className="icon-button"
                 type="button"
                 title="Download JSON"
-                disabled={!extraction.formattedJson}
+                disabled={!displayJson}
                 onClick={handleDownloadJson}
               >
                 <Download size={17} />
@@ -646,12 +691,61 @@ export default function App() {
 
           <div className="result-body">
             {activeTab === "json" ? (
-              extraction.formattedJson ? (
-                <pre>{extraction.formattedJson}</pre>
+              displayJson ? (
+                <pre>{displayJson}</pre>
               ) : (
                 <div className="empty-state">
                   <FileJson size={28} />
                   <span>{extraction.error}</span>
+                </div>
+              )
+            ) : null}
+            {activeTab === "questions" ? (
+              questions.length > 0 ? (
+                <div className="setup-questions-form">
+                  <div className="setup-intro">
+                    <p className="setup-description">
+                      The agent has detected that the generated workflow requires custom configurations.
+                      Provide your values below to dynamically configure your workflow.
+                    </p>
+                  </div>
+                  <div className="setup-grid">
+                    {questions.map((q) => (
+                      <div className="setup-field-card" key={q.id}>
+                        <div className="field-meta">
+                          <span className="node-badge">{q.nodeName}</span>
+                          <span className="param-badge">{q.parameterName}</span>
+                        </div>
+                        <label className="setup-label">
+                          <span className="question-text">{q.question}</span>
+                          {q.description && (
+                            <span className="field-desc">{q.description}</span>
+                          )}
+                          <input
+                            type={q.type === "password" ? "password" : "text"}
+                            className="setup-input"
+                            value={answers[q.id] || ""}
+                            placeholder={q.placeholder || `Enter ${q.label}`}
+                            onChange={(e) => {
+                              setAnswers((prev) => ({
+                                ...prev,
+                                [q.id]: e.target.value,
+                              }));
+                            }}
+                          />
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <Sliders size={28} />
+                  <span>
+                    {runState === "success"
+                      ? "No required parameters or credentials were found for this workflow."
+                      : "Questions will appear here once parameter detection runs."}
+                  </span>
                 </div>
               )
             ) : null}

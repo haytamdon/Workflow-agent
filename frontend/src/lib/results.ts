@@ -174,3 +174,34 @@ export function extractAuditMarkdown(input: unknown): string {
   }
   return text;
 }
+
+export interface ParameterQuestion {
+  id: string;
+  nodeName: string;
+  parameterName: string;
+  type: "string" | "number" | "boolean" | "password";
+  label: string;
+  question: string;
+  description?: string;
+  placeholder?: string;
+}
+
+export function extractQuestions(input: unknown): ParameterQuestion[] {
+  const text = stringify(input).trim();
+  if (!text) {
+    return [];
+  }
+  const match = text.match(/```json-questions\s*([\s\S]*?)```/i);
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[1].trim());
+      if (Array.isArray(parsed)) {
+        return parsed as ParameterQuestion[];
+      }
+    } catch (e) {
+      console.error("Failed to parse json-questions block", e);
+    }
+  }
+  return [];
+}
+
