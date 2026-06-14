@@ -191,6 +191,8 @@ export function extractQuestions(input: unknown): ParameterQuestion[] {
   if (!text) {
     return [];
   }
+  
+  // 1. Try to match the fenced block (for compatibility)
   const match = text.match(/```json-questions\s*([\s\S]*?)```/i);
   if (match) {
     try {
@@ -202,6 +204,66 @@ export function extractQuestions(input: unknown): ParameterQuestion[] {
       console.error("Failed to parse json-questions block", e);
     }
   }
+
+  // 2. Try to find the QuestionsList JSON object
+  for (const candidate of findJsonObjectCandidates(text)) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && Array.isArray(parsed.questions)) {
+        const questions = parsed.questions;
+        // Check if this is the parameter questions (it has missing_parameter_name)
+        if (questions.length > 0 && typeof questions[0].missing_parameter_name === "string") {
+          return questions.map((q: any) => {
+            const param = q.missing_parameter_name || "parameter";
+            return {
+              id: param,
+              nodeName: q.nodeName || "", // Empty if not provided, App.tsx will fallback search
+              parameterName: param,
+              type: q.type || "string",
+              label: q.label || param,
+              question: q.question || "",
+              description: q.description || "",
+              placeholder: q.placeholder || "",
+            };
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   return [];
 }
+
+export interface ClarificationQuestion {
+  id: string;
+  question: string;
+  clarification_key: string;
+}
+
+export function extractClarifications(input: unknown): ClarificationQuestion[] {
+  const text = stringify(input).trim();
+  if (!text) {
+    return [];
+  }
+
+  // Find the ClarificationQuestionsList JSON object
+  for (const candidate of findJsonObjectCandidates(text)) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && Array.isArray(parsed.questions)) {
+        const questions = parsed.questions;
+        if (questions.length > 0 && typeof questions[0].clarification_key === "string") {
+          return questions as ClarificationQuestion[];
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return [];
+}
+
 
