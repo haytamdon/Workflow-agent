@@ -44,9 +44,11 @@ import {
 import { readStoredValue, writeStoredValue } from "./lib/storage";
 
 const DEFAULT_AGENTOS_BASE_URL =
-  import.meta.env.VITE_AGENTOS_BASE_URL || "http://localhost:8000";
+  import.meta.env.VITE_AGENTOS_BASE_URL ||
+  (import.meta.env.DEV ? "http://localhost:8000" : window.location.origin);
 const DEFAULT_N8N_BASE_URL =
-  import.meta.env.VITE_N8N_BASE_URL || "http://localhost:5678";
+  import.meta.env.VITE_N8N_BASE_URL ||
+  (import.meta.env.DEV ? "http://localhost:5678" : `${window.location.protocol}//${window.location.hostname}:5678`);
 
 const STAGES = [
   { label: "Needs Clarifier", token: "needs clarifier" },
