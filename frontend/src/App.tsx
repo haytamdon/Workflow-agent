@@ -35,18 +35,23 @@ import {
   extractAuditMarkdown,
   extractWorkflowJson,
   extractQuestions,
+  extractClarifications,
   type N8nWorkflow,
   type WorkflowExtraction,
   type ParameterQuestion,
+  type ClarificationQuestion,
 } from "./lib/results";
 import { readStoredValue, writeStoredValue } from "./lib/storage";
 
 const DEFAULT_AGENTOS_BASE_URL =
-  import.meta.env.VITE_AGENTOS_BASE_URL || "http://localhost:8000";
+  import.meta.env.VITE_AGENTOS_BASE_URL ||
+  (import.meta.env.DEV ? "http://localhost:8000" : window.location.origin);
 const DEFAULT_N8N_BASE_URL =
-  import.meta.env.VITE_N8N_BASE_URL || "http://localhost:5678";
+  import.meta.env.VITE_N8N_BASE_URL ||
+  (import.meta.env.DEV ? "http://localhost:5678" : `${window.location.protocol}//${window.location.hostname}:5678`);
 
 const STAGES = [
+  { label: "Needs Clarifier", token: "needs clarifier" },
   { label: "Query Enhancer", token: "query enhancer" },
   { label: "Workflow Designer", token: "workflow designer" },
   { label: "Workflow Creator", token: "workflow creator" },
@@ -86,7 +91,7 @@ const EXAMPLES = [
 ];
 
 type RunState = "idle" | "running" | "success" | "error";
-type ResultTab = "json" | "questions" | "audit" | "raw";
+type ResultTab = "json" | "clarifications" | "questions" | "audit" | "raw";
 
 function createSessionId(): string {
   return `workflow-ui-${Date.now().toString(36)}`;
@@ -117,17 +122,17 @@ function getStageIndexFromText(text: string, fallback: number): number {
   if (matchedIndex >= 0) {
     return matchedIndex;
   }
-  if (lower.includes("enhanced prompt")) {
+  if (lower.includes("clarification")) {
     return Math.max(fallback, 1);
   }
-  if (lower.includes("nodes") && lower.includes("connections")) {
+  if (lower.includes("enhanced prompt")) {
     return Math.max(fallback, 2);
   }
-  if (lower.includes("validation") || lower.includes("audit")) {
-    return Math.max(fallback, 3);
-  }
-  if (lower.includes("parameter") || lower.includes("question")) {
+  if (lower.includes("nodes") && lower.includes("connections")) {
     return Math.max(fallback, 4);
+  }
+  if (lower.includes("validation") || lower.includes("audit")) {
+    return Math.max(fallback, 5);
   }
   return fallback;
 }
@@ -192,13 +197,22 @@ export default function App() {
     return extractQuestions(rawOutput);
   }, [rawOutput]);
 
+  const clarifications = useMemo(() => {
+    return extractClarifications(rawOutput);
+  }, [rawOutput]);
+
   const modifiedWorkflow = useMemo(() => {
     if (!workflow) return null;
     const cloned = JSON.parse(JSON.stringify(workflow));
     questions.forEach((q) => {
       const answerVal = answers[q.id];
       if (answerVal !== undefined && answerVal.trim() !== "") {
-        const node = cloned.nodes.find((n: any) => n.name === q.nodeName);
+        let node = q.nodeName ? cloned.nodes.find((n: any) => n.name === q.nodeName) : null;
+        if (!node && q.parameterName) {
+          node = cloned.nodes.find(
+            (n: any) => n.parameters && q.parameterName in n.parameters,
+          );
+        }
         if (node) {
           if (!node.parameters) {
             node.parameters = {};
@@ -277,10 +291,22 @@ export default function App() {
     setRawOutput("");
     setAuditMarkdown("");
     setExtraction(extractWorkflowJson(""));
-    setAnswers({});
     setErrorMessage("");
     setCreatedWorkflow(null);
     setCopyState("idle");
+
+    const answeredClarifications = clarifications
+      .map((q) => {
+        const answer = answers[q.id];
+        return answer?.trim() ? `- ${q.question} Answer: ${answer.trim()}` : null;
+      })
+      .filter(Boolean)
+      .join("\n");
+
+    const baseMessage = buildGenerationMessage({ prompt, integrations, requirements });
+    const finalMessage = answeredClarifications
+      ? `${baseMessage}\n\nUser's clarifications to previous questions:\n${answeredClarifications}`
+      : baseMessage;
 
     try {
       const response = await runWorkflow({
@@ -290,7 +316,7 @@ export default function App() {
         sessionId,
         stream: true,
         signal: abortController.signal,
-        message: buildGenerationMessage({ prompt, integrations, requirements }),
+        message: finalMessage,
         onEvent: (event) => {
           eventBuffer.push(event);
           setEvents([...eventBuffer]);
@@ -313,7 +339,15 @@ export default function App() {
       setExtraction(finalExtraction);
       setActiveStage(STAGES.length - 1);
       setRunState("success");
-      setActiveTab(finalExtraction.workflow ? "json" : "raw");
+
+      const finalClarifications = extractClarifications(finalRaw);
+      if (finalClarifications.length > 0) {
+        setActiveTab("clarifications");
+      } else if (finalExtraction.workflow) {
+        setActiveTab("json");
+      } else {
+        setActiveTab("raw");
+      }
     } catch (error) {
       if (abortController.signal.aborted) {
         setErrorMessage("Generation stopped.");
@@ -388,6 +422,7 @@ export default function App() {
     setPrompt(example.prompt);
     setIntegrations(example.details);
     setWorkflowName(example.title);
+    setAnswers({});
   }
 
   return (
@@ -633,11 +668,19 @@ export default function App() {
                 JSON
               </button>
               <button
+                className={activeTab === "clarifications" ? "active" : ""}
+                type="button"
+                onClick={() => setActiveTab("clarifications")}
+              >
+                <HelpCircle size={16} />
+                Clarifications
+              </button>
+              <button
                 className={activeTab === "questions" ? "active" : ""}
                 type="button"
                 onClick={() => setActiveTab("questions")}
               >
-                <HelpCircle size={16} />
+                <Sliders size={16} />
                 Questions
               </button>
               <button
@@ -700,6 +743,51 @@ export default function App() {
                 </div>
               )
             ) : null}
+            {activeTab === "clarifications" ? (
+              clarifications.length > 0 ? (
+                <div className="setup-questions-form">
+                  <div className="setup-intro">
+                    <p className="setup-description">
+                      The agent needs some extra clarifications to understand your requirements better.
+                      Provide your answers below and click Generate again to refine the workflow.
+                    </p>
+                  </div>
+                  <div className="setup-grid">
+                    {clarifications.map((q) => (
+                      <div className="setup-field-card" key={q.id}>
+                        <div className="field-meta">
+                          <span className="param-badge">{q.clarification_key}</span>
+                        </div>
+                        <label className="setup-label">
+                          <span className="question-text">{q.question}</span>
+                          <input
+                            type="text"
+                            className="setup-input"
+                            value={answers[q.id] || ""}
+                            placeholder="Type clarification here..."
+                            onChange={(e) => {
+                              setAnswers((prev) => ({
+                                ...prev,
+                                [q.id]: e.target.value,
+                              }));
+                            }}
+                          />
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <HelpCircle size={28} />
+                  <span>
+                    {runState === "success"
+                      ? "No clarification questions were generated. The agent understood your request completely!"
+                      : "Clarification questions will appear here once the needs clarifier agent runs."}
+                  </span>
+                </div>
+              )
+            ) : null}
             {activeTab === "questions" ? (
               questions.length > 0 ? (
                 <div className="setup-questions-form">
@@ -713,7 +801,7 @@ export default function App() {
                     {questions.map((q) => (
                       <div className="setup-field-card" key={q.id}>
                         <div className="field-meta">
-                          <span className="node-badge">{q.nodeName}</span>
+                          {q.nodeName && <span className="node-badge">{q.nodeName}</span>}
                           <span className="param-badge">{q.parameterName}</span>
                         </div>
                         <label className="setup-label">
