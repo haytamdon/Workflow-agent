@@ -121,25 +121,12 @@ You must do two things:
    - Find parameters that have placeholder values (like `your-email@example.com`, `YOUR_TELEGRAM_CHAT_ID`, `your_slack_credentials_id`, `replace-me`, etc.) or are empty/missing but required.
    - For credentials fields (like credential name references under the "credentials" key of a node), flag them so the user is prompted to provide their credentials name or connection info.
 
-2. Generate the output in two sections:
+2. Generate questions to be answered by the user relevant to the missing parameters, the questions should be concise, use the following JSON structure:
+   [{
+    "question": "The question to be asked to the user",
+    "missing_parameter_name": "The name of the missing parameter"
+   }]
 
-   A. JSON Block for Frontend Setup Form:
-      Output a single JSON array wrapped in a ```json-questions code block.
-      Each item in the array MUST represent a required parameter and have this structure:
-      {
-        "id": "unique-slug-id",
-        "nodeName": "Exact Name of the Node",
-        "parameterName": "parameter_key_name",  // the key under parameters in the JSON, e.g., "url", "to", "chatId", "channel", etc.
-        "type": "string" | "number" | "boolean" | "password",
-        "label": "Short User Friendly Label",
-        "question": "Clear, friendly question asking the user for this value",
-        "description": "Short explanation of what this is and how/where the user can retrieve it",
-        "placeholder": "Helpful example value"
-      }
-
-   B. Markdown Summary:
-      Provide a clean, user-friendly markdown list summarizing the detected parameters, which node they belong to, and why they are required, formatted using clean markdown.
-
-Ensure that the nodeName matches the EXACT spelling of the node's name in the n8n JSON.
-If no parameters or questions are required (e.g. a simple, self-contained workflow with only code nodes and no external integrations), return an empty list in the JSON block, and a short message stating that no additional parameters are required.
+Ensure that the missing_parameter_name matches the EXACT spelling of the parameter in the n8n JSON.
+If no parameters or questions are required, return an empty list.
 """
