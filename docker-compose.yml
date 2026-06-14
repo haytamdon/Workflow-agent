@@ -57,6 +57,13 @@ services:
       N8N_API_KEY: ${N8N_API_KEY:-}
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Africa/Casablanca}
       TZ: ${TZ:-Africa/Casablanca}
+      N8N_INSTANCE_OWNER_MANAGED_BY_ENV: "true"
+      N8N_INSTANCE_OWNER_EMAIL: "admin@example.com"
+      N8N_INSTANCE_OWNER_FIRST_NAME: "Admin"
+      N8N_INSTANCE_OWNER_LAST_NAME: "Agent"
+      N8N_INSTANCE_OWNER_PASSWORD_HASH: "$$2b$$12$$9g8iaZmGwO/xKTgYavwkj.DPLA2h90A.Xdzpfw7IBYAeALP/rt5O."
+      N8N_MCP_ENABLED: "true"
+      N8N_USER_MANAGEMENT_JWT_SECRET: ${N8N_USER_MANAGEMENT_JWT_SECRET:-}
     volumes:
       - n8n_data:/home/node/.n8n
     depends_on:

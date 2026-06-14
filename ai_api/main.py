@@ -12,6 +12,8 @@ from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from n8n_api.n8n import router as n8n_router
 from ai_api.db.session import get_postgres_db
+import threading
+from ai_api.db.seed import seed_n8n_database
 
 runtime_env = os.getenv("RUNTIME_ENV", "prd")
 scheduler_base_url = os.getenv("AGENTOS_URL", "http://127.0.0.1:8000")
@@ -25,6 +27,7 @@ scheduler_base_url = os.getenv("AGENTOS_URL", "http://127.0.0.1:8000")
 @asynccontextmanager
 async def lifespan(app):  # type: ignore[no-untyped-def]
     log_info("AgentOS lifespan: startup")
+    threading.Thread(target=seed_n8n_database, daemon=True).start()
     try:
         yield
     finally:
