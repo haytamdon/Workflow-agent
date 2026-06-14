@@ -1,7 +1,7 @@
 from agno.agent import Agent
-from models import get_model
-from db import get_postgres_db
-from prompts.agent_instructions import PARAMETER_DETECTOR_INSTRUCTIONS
+from ai_api.models import get_model
+from ai_api.db import get_postgres_db
+from ai_api.prompts.agent_instructions import PARAMETER_DETECTOR_INSTRUCTIONS
 from pydantic import BaseModel
 
 class Question(BaseModel):

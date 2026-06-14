@@ -8,7 +8,7 @@ PostgreSQL connection helpers.
 
 from agno.db.postgres import PostgresDb
 
-from db.url import db_url
+from .url import db_url
 
 DB_ID = "agentos-db"
 
