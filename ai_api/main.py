@@ -3,15 +3,17 @@ AgentOS Entrypoint
 ==================
 """
 
-from workflow.workflow import n8n_workflow_creation
+from ai_api.workflow.workflow import n8n_workflow_creation
 from agno.os import AgentOS
 from agno.utils.log import log_info
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
-from api.n8n import router as n8n_router
-from db.session import get_postgres_db
+from n8n_api.n8n import router as n8n_router
+from ai_api.db.session import get_postgres_db
+import threading
+from ai_api.db.seed import seed_n8n_database
 
 runtime_env = os.getenv("RUNTIME_ENV", "prd")
 scheduler_base_url = os.getenv("AGENTOS_URL", "http://127.0.0.1:8000")
@@ -25,6 +27,7 @@ scheduler_base_url = os.getenv("AGENTOS_URL", "http://127.0.0.1:8000")
 @asynccontextmanager
 async def lifespan(app):  # type: ignore[no-untyped-def]
     log_info("AgentOS lifespan: startup")
+    threading.Thread(target=seed_n8n_database, daemon=True).start()
     try:
         yield
     finally:
@@ -62,4 +65,4 @@ app.add_middleware(
 app.include_router(n8n_router)
 
 if __name__ == "__main__":
-    agent_os.serve(app="app.main:app", reload=runtime_env == "dev", port=8000)
+    agent_os.serve(app="ai_api.main:app", reload=runtime_env == "dev", port=8000)
