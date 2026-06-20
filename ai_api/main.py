@@ -1,50 +1,44 @@
 """
-AgentOS Entrypoint
-==================
+Workflow API Entrypoint
+======================
 """
 
-from ai_api.workflow.workflow import n8n_workflow_creation
-from agno.os import AgentOS
+from fastapi import FastAPI, Form, HTTPException
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from agno.utils.log import log_info
 import os
-from contextlib import asynccontextmanager
-from pathlib import Path
-from fastapi.middleware.cors import CORSMiddleware
-from n8n_api.n8n import router as n8n_router
-from ai_api.db.session import get_postgres_db
+import json
 import threading
 from ai_api.db.seed import seed_n8n_database
+from ai_api.db.session import init_db
+from n8n_api.n8n import router as n8n_router
 
 runtime_env = os.getenv("RUNTIME_ENV", "prd")
-scheduler_base_url = os.getenv("AGENTOS_URL", "http://127.0.0.1:8000")
 
-# ---------------------------------------------------------------------------
-# Lifespan — extension hook for app-level startup / teardown.
-#
-# AgentOS handles the MCP lifecycle (connect on startup, close on shutdown).
-# Keep this hook in place so you can plug in your own setup as needed.
-# ---------------------------------------------------------------------------
+# Lifespan — startup / teardown hook.
 @asynccontextmanager
-async def lifespan(app):  # type: ignore[no-untyped-def]
-    log_info("AgentOS lifespan: startup")
+async def lifespan(app: FastAPI):
+    log_info("Workflow API lifespan: startup")
+    try:
+        init_db()
+        log_info("SQLAlchemy database tables initialized.")
+    except Exception as e:
+        log_info(f"Database initialization failed: {e}")
+
     threading.Thread(target=seed_n8n_database, daemon=True).start()
     try:
         yield
     finally:
-        log_info("AgentOS lifespan: shutdown")
+        log_info("Workflow API lifespan: shutdown")
 
-agent_os = AgentOS(
-    name="AgentOS",
-    tracing=True,
-    authorization=runtime_env == "prd",
-    lifespan=lifespan,
-    db=get_postgres_db(),
-    workflows=[n8n_workflow_creation],
-    # agents=[],
-    config=str(Path(__file__).parent / "config.yaml"),
+
+app = FastAPI(
+    title="Workflow API",
+    version="1.0.0",
+    lifespan=lifespan
 )
-
-app = agent_os.get_app()
 
 cors_origins = [
     origin.strip()
@@ -62,7 +56,58 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 app.include_router(n8n_router)
 
+
+@app.post("/workflows/{workflow_id}/runs")
+async def run_workflow_endpoint(
+    workflow_id: str,
+    message: str = Form(...),
+    session_id: str = Form(...),
+    user_id: str = Form(None),
+    stream: bool = Form(True),
+    answers: str = Form(None),
+):
+    """Run the multi-agent workflow statefully and stream progress using SSE."""
+    answers_dict = {}
+    if answers:
+        try:
+            answers_dict = json.loads(answers)
+        except Exception:
+            pass
+
+    from ai_api.workflow.workflow import execute_workflow_step
+
+    return StreamingResponse(
+        execute_workflow_step(session_id, message, answers_dict),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@app.get("/workflows/{session_id}/logs")
+async def get_workflow_logs(session_id: str):
+    """Fetch database execution logs for a specific session."""
+    from ai_api.db.session import get_db_session, WorkflowStep
+    with get_db_session() as db:
+        steps = db.query(WorkflowStep).filter_by(session_id=session_id).order_by(WorkflowStep.created_at.asc()).all()
+        return [
+            {
+                "agent_name": step.agent_name,
+                "status": step.status,
+                "output_text": step.output_text,
+                "output_json": step.output_json,
+                "created_at": step.created_at.isoformat() if step.created_at else None
+            }
+            for step in steps
+        ]
+
+
 if __name__ == "__main__":
-    agent_os.serve(app="ai_api.main:app", reload=runtime_env == "dev", port=8000)
+    import uvicorn
+    uvicorn.run("ai_api.main:app", host="0.0.0.0", port=8000, reload=runtime_env == "dev")

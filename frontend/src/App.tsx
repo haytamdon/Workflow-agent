@@ -26,8 +26,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   normalizeBaseUrl,
   runWorkflow,
+  getWorkflowLogs,
   type WorkflowRunEvent,
-} from "./lib/agentos";
+} from "./lib/workflow_api";
+
 import {
   createWorkflowInN8n,
   getCreateWorkflowState,
@@ -247,6 +249,8 @@ export default function App() {
     useState<CreatedN8nWorkflow | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [dbLogs, setDbLogs] = useState<any[]>([]);
+
   
   // Chatbot state
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
@@ -359,10 +363,43 @@ export default function App() {
     };
   }, [agentosBaseUrl, token]);
 
+  // Poll database agent execution logs while running
+  useEffect(() => {
+    if (runState !== "running") {
+      return;
+    }
+    const fetchLogs = async () => {
+      try {
+        const logs = await getWorkflowLogs(agentosBaseUrl, sessionId, token);
+        setDbLogs(logs);
+      } catch (err) {
+        console.error("Error fetching agent logs:", err);
+      }
+    };
+    fetchLogs(); // initial call
+    const interval = setInterval(fetchLogs, 1500);
+    return () => clearInterval(interval);
+  }, [runState, agentosBaseUrl, sessionId, token]);
+
+  // Sync active stepper stage with the latest logged agent from the DB
+  useEffect(() => {
+    if (dbLogs.length > 0) {
+      const latestLog = dbLogs[dbLogs.length - 1];
+      const matchedIndex = STAGES.findIndex(
+        (stage) => latestLog.agent_name.toLowerCase().replace(/_/g, " ") === stage.token
+      );
+      if (matchedIndex >= 0) {
+        setActiveStage(matchedIndex);
+      }
+    }
+  }, [dbLogs]);
+
+
   async function runGenerationFlow(
     currentPrompt: string,
     botMsgId: string,
-    overrideIntegrations?: string
+    overrideIntegrations?: string,
+    overrideAnswers?: Record<string, string>
   ) {
     abortRef.current?.abort();
     const abortController = new AbortController();
@@ -378,12 +415,14 @@ export default function App() {
     setErrorMessage("");
     setCreatedWorkflow(null);
     setCopyState("idle");
+    setDbLogs([]); // Reset log cache
 
     const integrationsToUse = overrideIntegrations !== undefined ? overrideIntegrations : integrations;
+    const answersToUse = overrideAnswers !== undefined ? overrideAnswers : answers;
 
     const answeredClarifications = clarifications
       .map((q) => {
-        const answer = answers[q.id];
+        const answer = answersToUse[q.id];
         return answer?.trim() ? `- ${q.question} Answer: ${answer.trim()}` : null;
       })
       .filter(Boolean)
@@ -409,7 +448,9 @@ export default function App() {
         stream: true,
         signal: abortController.signal,
         message: finalMessage,
+        answers: answersToUse, // Send answers payload to FastAPI Form field
         onEvent: (event) => {
+
           eventBuffer.push(event);
           setEvents([...eventBuffer]);
           const formatted = formatRawEvents(eventBuffer);
@@ -586,26 +627,43 @@ export default function App() {
     };
 
     setMessages((prev) => [...prev, userMsg, botMsg]);
-    runGenerationFlow(prompt, botMsgId);
+    runGenerationFlow(prompt, botMsgId, undefined, updatedAnswers);
   }
 
-  function handleParametersApply(e: React.FormEvent) {
+  async function handleParametersApply(e: React.FormEvent) {
     e.preventDefault();
     
     const updatedAnswers = { ...answers, ...formAnswers };
     setAnswers(updatedAnswers);
     setActiveQuestionType(null);
 
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: `sys-applied-${Date.now()}`,
-        sender: "system",
-        text: "Configuration parameters applied to the workflow. The JSON output has been updated.",
-        timestamp: new Date(),
-      },
-    ]);
+    const answersText = Object.entries(formAnswers)
+      .map(([key, val]) => {
+        const q = questions.find((c) => c.id === key);
+        return `- **${q?.question || key}**: ${val}`;
+      })
+      .join("\n");
+
+    const userMsgId = `user-${Date.now()}`;
+    const userMsg: ChatMessage = {
+      id: userMsgId,
+      sender: "user",
+      text: `Applying configuration parameters:\n\n${answersText}`,
+      timestamp: new Date(),
+    };
+
+    const botMsgId = `bot-${Date.now()}`;
+    const botMsg: ChatMessage = {
+      id: botMsgId,
+      sender: "bot",
+      text: "Injecting parameters into workflow...",
+      timestamp: new Date(),
+    };
+
+    setMessages((prev) => [...prev, userMsg, botMsg]);
+    await runGenerationFlow(prompt, botMsgId, undefined, updatedAnswers);
   }
+
 
   function handleResetSession() {
     abortRef.current?.abort();
@@ -725,8 +783,9 @@ export default function App() {
         </div>
         <div className="brand-copy">
           <h1>Workflow Agent</h1>
-          <span>AgentOS to n8n</span>
+          <span>Workflow API to n8n</span>
         </div>
+
         <div className="topbar-actions">
           <button
             className="icon-button"
@@ -759,12 +818,13 @@ export default function App() {
       {showSettings ? (
         <section className="settings-band" aria-label="Settings">
           <label>
-            <span>AgentOS URL</span>
+            <span>Workflow API URL</span>
             <input
               value={agentosBaseUrl}
               onChange={(event) => setAgentosBaseUrl(event.target.value)}
             />
           </label>
+
           <label>
             <span>n8n URL</span>
             <input
@@ -979,6 +1039,43 @@ export default function App() {
               );
             })}
           </div>
+
+          {dbLogs.length > 0 && (
+            <div className="db-logs-panel" style={{
+              margin: "0 1.5rem 1rem 1.5rem",
+              padding: "0.75rem",
+              background: "rgba(255, 255, 255, 0.03)",
+              border: "1px solid var(--border-color)",
+              borderRadius: "8px",
+              boxShadow: "inset 0 1px 2px rgba(0,0,0,0.2)"
+            }}>
+              <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--text-muted)", marginBottom: "0.4rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                Agent Execution Logs (Traces)
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                {dbLogs.map((log, index) => {
+                  const isRunning = log.status === "running";
+                  const isCompleted = log.status === "completed";
+                  const isFailed = log.status === "failed";
+                  let statusColor = "var(--text-muted)";
+                  if (isRunning) statusColor = "var(--color-primary)";
+                  if (isCompleted) statusColor = "#4caf50";
+                  if (isFailed) statusColor = "#f44336";
+                  
+                  return (
+                    <div key={index} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.72rem", padding: "0.25rem 0.5rem", background: "rgba(255,255,255,0.02)", borderRadius: "4px" }}>
+                      <span style={{ fontWeight: 500, color: "var(--text-color)" }}>{log.agent_name.replace(/_/g, " ").toUpperCase()}</span>
+                      <span style={{ color: statusColor, fontWeight: 600, display: "flex", alignItems: "center", gap: "0.25rem" }}>
+                        {isRunning && <Loader2 size={10} className="spin" style={{ animation: "spin 1s linear infinite" }} />}
+                        {log.status.toUpperCase()}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
 
           <div className="results-header">
             <div className="tabs" role="tablist" aria-label="Results">

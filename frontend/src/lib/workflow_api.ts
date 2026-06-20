@@ -21,6 +21,7 @@ export interface WorkflowRunInput {
   token?: string;
   stream?: boolean;
   signal?: AbortSignal;
+  answers?: Record<string, string>;
   onEvent?: (event: WorkflowRunEvent) => void;
 }
 
@@ -45,6 +46,7 @@ export function buildWorkflowRunForm(input: {
   userId?: string;
   sessionId?: string;
   stream?: boolean;
+  answers?: Record<string, string>;
 }): FormData {
   const form = new FormData();
   form.append("message", input.message);
@@ -55,6 +57,9 @@ export function buildWorkflowRunForm(input: {
   }
   if (input.sessionId?.trim()) {
     form.append("session_id", input.sessionId.trim());
+  }
+  if (input.answers) {
+    form.append("answers", JSON.stringify(input.answers));
   }
 
   return form;
@@ -197,13 +202,14 @@ export async function runWorkflow(
       userId: input.userId,
       sessionId: input.sessionId,
       stream: input.stream ?? true,
+      answers: input.answers,
     }),
     signal: input.signal,
   });
 
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(detail || `AgentOS request failed with ${response.status}`);
+    throw new Error(detail || `Request failed with ${response.status}`);
   }
 
   const contentType = response.headers.get("content-type") ?? "";
@@ -233,4 +239,19 @@ export async function runWorkflow(
     rawText,
     events: [event],
   };
+}
+
+export async function getWorkflowLogs(
+  baseUrl: string,
+  sessionId: string,
+  token?: string,
+): Promise<any[]> {
+  const response = await fetch(`${normalizeBaseUrl(baseUrl)}/workflows/${encodeURIComponent(sessionId)}/logs`, {
+    method: "GET",
+    headers: buildAuthHeaders(token),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch workflow logs: ${response.statusText}`);
+  }
+  return response.json();
 }

@@ -17,7 +17,7 @@ since all the details you provide will be turned letter by letter to the workflo
 be random and if you give code sections provide the necessary code as well preferably in javascript and 
 do not use any other language other than JS & Python (only when necessary) since they are the only 2 languages 
 used in n8n workflows, and finally consider all of the following:
-1. The query and all of the details provided.
+1. The query and all of the extra clarifications provided.
 2. The best practices for n8n workflow design.
 3. The best practices for n8n workflow implementation.
 4. All of the skills provided
