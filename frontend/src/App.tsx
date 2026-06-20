@@ -3,18 +3,22 @@ import {
   Bot,
   Braces,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clipboard,
   Download,
   ExternalLink,
   FileJson,
   HelpCircle,
   Loader2,
+  Moon,
   Play,
   RefreshCw,
   Send,
   Settings2,
   Sliders,
   Square,
+  Sun,
   Wand2,
   XCircle,
 } from "lucide-react";
@@ -91,7 +95,50 @@ const EXAMPLES = [
 ];
 
 type RunState = "idle" | "running" | "success" | "error";
-type ResultTab = "json" | "clarifications" | "questions" | "audit" | "raw";
+type ResultTab = "json" | "audit" | "raw";
+
+function renderMessageText(text: string) {
+  if (!text) return null;
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  return parts.map((part, index) => {
+    if (part.startsWith("```")) {
+      const match = part.match(/```(\w+)?\n([\s\S]*?)```/);
+      const lang = match ? match[1] : "";
+      const code = match ? match[2] : part.slice(3, -3);
+      return (
+        <pre key={index} style={{ margin: "0.5rem 0", padding: "0.75rem", background: "rgba(0,0,0,0.2)", border: "1px solid var(--border-color)", borderRadius: "6px", overflowX: "auto" }}>
+          {lang && <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", textTransform: "uppercase", marginBottom: "0.25rem" }}>{lang}</div>}
+          <code style={{ fontFamily: "var(--font-mono)", fontSize: "0.8rem" }}>{code.trim()}</code>
+        </pre>
+      );
+    }
+
+    const lines = part.split("\n").map((line, lineIdx) => {
+      const boldSegments = line.split(/(\*\*.*?\*\*)/);
+      return (
+        <p key={lineIdx} style={{ minHeight: line === "" ? "1em" : "auto" }}>
+          {boldSegments.map((seg, segIdx) => {
+            if (seg.startsWith("**") && seg.endsWith("**")) {
+              return <strong key={segIdx}>{seg.slice(2, -2)}</strong>;
+            }
+            const inlineCodeSegments = seg.split(/(`[^`]+`)/);
+            return inlineCodeSegments.map((inlineSeg, inlineIdx) => {
+              if (inlineSeg.startsWith("`") && inlineSeg.endsWith("`")) {
+                return (
+                  <code key={inlineIdx} style={{ fontFamily: "var(--font-mono)", fontSize: "0.85em", background: "rgba(255,255,255,0.05)", padding: "0.1em 0.3em", borderRadius: "3px" }}>
+                    {inlineSeg.slice(1, -1)}
+                  </code>
+                );
+              }
+              return inlineSeg;
+            });
+          })}
+        </p>
+      );
+    });
+    return <span key={index}>{lines}</span>;
+  });
+}
 
 function createSessionId(): string {
   return `workflow-ui-${Date.now().toString(36)}`;
@@ -149,11 +196,21 @@ function formatRawEvents(events: WorkflowRunEvent[]): string {
     .join("\n\n");
 }
 
+interface ChatMessage {
+  id: string;
+  sender: "user" | "bot" | "system";
+  text: string;
+  timestamp: Date;
+}
+
 function getWorkflowNodeCount(workflow: N8nWorkflow | null): number {
   return workflow?.nodes.length ?? 0;
 }
 
 export default function App() {
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    return (readStoredValue("workflow-agent.theme") as "dark" | "light") || "dark";
+  });
   const [agentosBaseUrl, setAgentosBaseUrl] = useState(() =>
     normalizeBaseUrl(readStoredValue("workflow-agent.agentos", DEFAULT_AGENTOS_BASE_URL)),
   );
@@ -190,7 +247,34 @@ export default function App() {
     useState<CreatedN8nWorkflow | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  
+  // Chatbot state
+  const [messages, setMessages] = useState<ChatMessage[]>(() => [
+    {
+      id: "welcome",
+      sender: "bot",
+      text: "Hi! I am your AI Workflow Agent. I can help you design, validate, and create n8n workflows.\n\nDescribe the workflow you want to build in the box below to get started!",
+      timestamp: new Date(),
+    },
+  ]);
+  const [chatInput, setChatInput] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [activeQuestionType, setActiveQuestionType] = useState<"clarifications" | "parameters" | null>(null);
+  const [formAnswers, setFormAnswers] = useState<Record<string, string>>({});
+  
   const abortRef = useRef<AbortController | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Theme effect
+  useEffect(() => {
+    writeStoredValue("workflow-agent.theme", theme);
+    document.documentElement.className = `theme-${theme}`;
+  }, [theme]);
+
+  // Autoscroll effect
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, runState]);
 
   const workflow = extraction.workflow;
   const questions = useMemo(() => {
@@ -275,11 +359,11 @@ export default function App() {
     };
   }, [agentosBaseUrl, token]);
 
-  async function handleGenerate() {
-    if (!prompt.trim() || runState === "running") {
-      return;
-    }
-
+  async function runGenerationFlow(
+    currentPrompt: string,
+    botMsgId: string,
+    overrideIntegrations?: string
+  ) {
     abortRef.current?.abort();
     const abortController = new AbortController();
     abortRef.current = abortController;
@@ -295,6 +379,8 @@ export default function App() {
     setCreatedWorkflow(null);
     setCopyState("idle");
 
+    const integrationsToUse = overrideIntegrations !== undefined ? overrideIntegrations : integrations;
+
     const answeredClarifications = clarifications
       .map((q) => {
         const answer = answers[q.id];
@@ -303,10 +389,16 @@ export default function App() {
       .filter(Boolean)
       .join("\n");
 
-    const baseMessage = buildGenerationMessage({ prompt, integrations, requirements });
+    const baseMessage = buildGenerationMessage({
+      prompt: currentPrompt,
+      integrations: integrationsToUse,
+      requirements,
+    });
     const finalMessage = answeredClarifications
       ? `${baseMessage}\n\nUser's clarifications to previous questions:\n${answeredClarifications}`
       : baseMessage;
+
+    let accumulatedText = "";
 
     try {
       const response = await runWorkflow({
@@ -322,13 +414,22 @@ export default function App() {
           setEvents([...eventBuffer]);
           const formatted = formatRawEvents(eventBuffer);
           setRawOutput(formatted);
+          
+          if (event.text) {
+            accumulatedText += event.text;
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === botMsgId ? { ...msg, text: accumulatedText } : msg
+              )
+            );
+          }
           setActiveStage((current) => getStageIndexFromText(event.text, current));
         },
       });
 
       const finalRaw =
         response.rawText ||
-        rawOutput ||
+        accumulatedText ||
         formatRawEvents(response.events.length ? response.events : eventBuffer);
       const finalExtraction = extractWorkflowJson(
         finalRaw || response.payload || response.events,
@@ -340,28 +441,226 @@ export default function App() {
       setActiveStage(STAGES.length - 1);
       setRunState("success");
 
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === botMsgId ? { ...msg, text: finalRaw } : msg
+        )
+      );
+
       const finalClarifications = extractClarifications(finalRaw);
+      const finalQuestions = extractQuestions(finalRaw);
+
       if (finalClarifications.length > 0) {
-        setActiveTab("clarifications");
-      } else if (finalExtraction.workflow) {
         setActiveTab("json");
+        setActiveQuestionType("clarifications");
+        const initialFormAnswers: Record<string, string> = {};
+        finalClarifications.forEach((q) => {
+          initialFormAnswers[q.id] = answers[q.id] || "";
+        });
+        setFormAnswers(initialFormAnswers);
+        
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `sys-clarify-${Date.now()}`,
+            sender: "system",
+            text: "Clarification questions require response in the bottom input box.",
+            timestamp: new Date(),
+          },
+        ]);
+      } else if (finalQuestions.length > 0) {
+        setActiveTab("json");
+        setActiveQuestionType("parameters");
+        const initialFormAnswers: Record<string, string> = {};
+        finalQuestions.forEach((q) => {
+          initialFormAnswers[q.id] = answers[q.id] || "";
+        });
+        setFormAnswers(initialFormAnswers);
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `sys-params-${Date.now()}`,
+            sender: "system",
+            text: "Workflow configuration parameters require values in the bottom input box.",
+            timestamp: new Date(),
+          },
+        ]);
       } else {
-        setActiveTab("raw");
+        if (finalExtraction.workflow) {
+          setActiveTab("json");
+        } else {
+          setActiveTab("raw");
+        }
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `sys-success-${Date.now()}`,
+            sender: "system",
+            text: "Workflow generated successfully! Review, copy, and create it in n8n on the right panel.",
+            timestamp: new Date(),
+          },
+        ]);
       }
     } catch (error) {
+      let errorText = "";
       if (abortController.signal.aborted) {
+        errorText = "Generation stopped.";
         setErrorMessage("Generation stopped.");
       } else {
-        setErrorMessage(error instanceof Error ? error.message : String(error));
+        errorText = error instanceof Error ? error.message : String(error);
+        setErrorMessage(errorText);
       }
       setRunState("error");
+      
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === botMsgId
+            ? { ...msg, text: msg.text + `\n\n**Error:** ${errorText}` }
+            : msg
+        )
+      );
     } finally {
       abortRef.current = null;
     }
   }
 
+  async function handleSendChatMessage(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    if (!chatInput.trim() || runState === "running") {
+      return;
+    }
+
+    const userPrompt = chatInput.trim();
+    setPrompt(userPrompt);
+    setChatInput("");
+
+    const userMsgId = `user-${Date.now()}`;
+    const userMsg: ChatMessage = {
+      id: userMsgId,
+      sender: "user",
+      text: userPrompt,
+      timestamp: new Date(),
+    };
+
+    const botMsgId = `bot-${Date.now()}`;
+    const botMsg: ChatMessage = {
+      id: botMsgId,
+      sender: "bot",
+      text: "Thinking...",
+      timestamp: new Date(),
+    };
+
+    setMessages((prev) => [...prev, userMsg, botMsg]);
+    await runGenerationFlow(userPrompt, botMsgId);
+  }
+
+  function handleClarificationSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    
+    const updatedAnswers = { ...answers, ...formAnswers };
+    setAnswers(updatedAnswers);
+    setActiveQuestionType(null);
+
+    const answersText = Object.entries(formAnswers)
+      .map(([key, val]) => {
+        const q = clarifications.find((c) => c.id === key);
+        return `- **${q?.question || key}**: ${val}`;
+      })
+      .join("\n");
+
+    const userMsgId = `user-${Date.now()}`;
+    const userMsg: ChatMessage = {
+      id: userMsgId,
+      sender: "user",
+      text: `Here are my clarifications:\n\n${answersText}`,
+      timestamp: new Date(),
+    };
+
+    const botMsgId = `bot-${Date.now()}`;
+    const botMsg: ChatMessage = {
+      id: botMsgId,
+      sender: "bot",
+      text: "Thinking...",
+      timestamp: new Date(),
+    };
+
+    setMessages((prev) => [...prev, userMsg, botMsg]);
+    runGenerationFlow(prompt, botMsgId);
+  }
+
+  function handleParametersApply(e: React.FormEvent) {
+    e.preventDefault();
+    
+    const updatedAnswers = { ...answers, ...formAnswers };
+    setAnswers(updatedAnswers);
+    setActiveQuestionType(null);
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `sys-applied-${Date.now()}`,
+        sender: "system",
+        text: "Configuration parameters applied to the workflow. The JSON output has been updated.",
+        timestamp: new Date(),
+      },
+    ]);
+  }
+
+  function handleResetSession() {
+    abortRef.current?.abort();
+    setSessionId(createSessionId());
+    setPrompt("");
+    setAnswers({});
+    setFormAnswers({});
+    setActiveQuestionType(null);
+    setRawOutput("");
+    setAuditMarkdown("");
+    setExtraction(extractWorkflowJson(""));
+    setErrorMessage("");
+    setCreatedWorkflow(null);
+    setRunState("idle");
+    setActiveStage(0);
+    setMessages([
+      {
+        id: "welcome",
+        sender: "bot",
+        text: "Hi! I am your AI Workflow Agent. I can help you design, validate, and create n8n workflows.\n\nDescribe the workflow you want to build in the box below to get started!",
+        timestamp: new Date(),
+      },
+    ]);
+  }
+
   function handleStop() {
     abortRef.current?.abort();
+  }
+
+  function applyExample(example: (typeof EXAMPLES)[number]) {
+    setPrompt(example.prompt);
+    setIntegrations(example.details);
+    setWorkflowName(example.title);
+    setAnswers({});
+    setFormAnswers({});
+    setActiveQuestionType(null);
+
+    const userMsgId = `user-${Date.now()}`;
+    const userMsg: ChatMessage = {
+      id: userMsgId,
+      sender: "user",
+      text: `Create workflow: ${example.title}\n\nPrompt: ${example.prompt}`,
+      timestamp: new Date(),
+    };
+
+    const botMsgId = `bot-${Date.now()}`;
+    const botMsg: ChatMessage = {
+      id: botMsgId,
+      sender: "bot",
+      text: "Thinking...",
+      timestamp: new Date(),
+    };
+
+    setMessages((prev) => [...prev, userMsg, botMsg]);
+    runGenerationFlow(example.prompt, botMsgId, example.details);
   }
 
   async function handleCopyJson() {
@@ -418,13 +717,6 @@ export default function App() {
     }
   }
 
-  function applyExample(example: (typeof EXAMPLES)[number]) {
-    setPrompt(example.prompt);
-    setIntegrations(example.details);
-    setWorkflowName(example.title);
-    setAnswers({});
-  }
-
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -436,6 +728,14 @@ export default function App() {
           <span>AgentOS to n8n</span>
         </div>
         <div className="topbar-actions">
+          <button
+            className="icon-button"
+            type="button"
+            title={theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
+            onClick={() => setTheme((curr) => (curr === "dark" ? "light" : "dark"))}
+          >
+            {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
           <a
             className="ghost-button"
             href={n8nBaseUrl}
@@ -489,174 +789,197 @@ export default function App() {
       ) : null}
 
       <section className="workspace">
-        <section className="composer-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Request</p>
-              <h2>Generate workflow</h2>
-            </div>
-            <Wand2 size={22} />
-          </div>
-
-          <div className="example-grid">
-            {EXAMPLES.map((example) => (
-              <button
-                key={example.title}
-                className="example-card"
-                type="button"
-                onClick={() => applyExample(example)}
-              >
-                <span>{example.title}</span>
-              </button>
-            ))}
-          </div>
-
-          <label className="field-block">
-            <span>Natural language request</span>
-            <textarea
-              className="prompt-area"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-            />
-          </label>
-
-          <label className="field-block">
-            <span>Integrations</span>
-            <textarea
-              value={integrations}
-              onChange={(event) => setIntegrations(event.target.value)}
-            />
-          </label>
-
-          <label className="field-block">
-            <span>Requirements</span>
-            <textarea
-              value={requirements}
-              onChange={(event) => setRequirements(event.target.value)}
-            />
-          </label>
-
-          <div className="inline-fields">
-            <label>
-              <span>Workflow name</span>
-              <input
-                value={workflowName}
-                onChange={(event) => setWorkflowName(event.target.value)}
-              />
-            </label>
-            <label>
-              <span>Session</span>
-              <div className="input-action">
-                <input
-                  value={sessionId}
-                  onChange={(event) => setSessionId(event.target.value)}
-                />
-                <button
-                  className="icon-button compact"
-                  type="button"
-                  title="New session"
-                  onClick={() => setSessionId(createSessionId())}
-                >
-                  <RefreshCw size={16} />
-                </button>
+        <section className="chat-panel">
+          <div className="chat-messages">
+            {messages.map((msg) => (
+              <div key={msg.id} className={`chat-message ${msg.sender}`}>
+                {msg.sender !== "system" && (
+                  <div className="message-avatar">
+                    {msg.sender === "user" ? <Bot size={16} style={{ transform: "rotate(180deg)" }} /> : <Bot size={16} />}
+                  </div>
+                )}
+                <div className="message-bubble">
+                  {msg.sender === "system" ? (
+                    <span style={{ fontStyle: "italic", fontSize: "0.8rem" }}>{msg.text}</span>
+                  ) : (
+                    renderMessageText(msg.text)
+                  )}
+                </div>
               </div>
-            </label>
+            ))}
+            <div ref={chatEndRef} />
           </div>
 
-          <div className="composer-actions">
-            {runState === "running" ? (
-              <button className="danger-button" type="button" onClick={handleStop}>
-                <Square size={16} />
-                Stop
-              </button>
-            ) : (
-              <button className="primary-button" type="button" onClick={handleGenerate}>
-                <Send size={17} />
-                Generate
-              </button>
+          <div className="chat-input-container">
+            {activeQuestionType === "clarifications" && (
+              <form onSubmit={handleClarificationSubmit} className="active-question-form">
+                <div className="active-question-header">
+                  <span className="active-question-title">Clarifications Required</span>
+                  <HelpCircle size={16} style={{ color: "var(--color-primary)" }} />
+                </div>
+                <div className="active-question-fields">
+                  {clarifications.map((q) => (
+                    <div className="active-question-field" key={q.id}>
+                      <label htmlFor={`clarify-${q.id}`}>{q.question}</label>
+                      <input
+                        id={`clarify-${q.id}`}
+                        type="text"
+                        value={formAnswers[q.id] || ""}
+                        placeholder="Type clarification here..."
+                        onChange={(e) => {
+                          setFormAnswers((prev) => ({
+                            ...prev,
+                            [q.id]: e.target.value,
+                          }));
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="active-question-actions">
+                  <button className="primary-button" type="submit">
+                    <Send size={14} />
+                    Submit Answers
+                  </button>
+                </div>
+              </form>
             )}
-            <label className="check-row">
-              <input
-                type="checkbox"
-                checked={activateWorkflow}
-                onChange={(event) => setActivateWorkflow(event.target.checked)}
-              />
-              <span>Activate after create</span>
-            </label>
+
+            {activeQuestionType === "parameters" && (
+              <form onSubmit={handleParametersApply} className="active-question-form">
+                <div className="active-question-header">
+                  <span className="active-question-title">Configure Parameters</span>
+                  <Sliders size={16} style={{ color: "var(--color-primary)" }} />
+                </div>
+                <div className="active-question-fields">
+                  {questions.map((q) => (
+                    <div className="active-question-field" key={q.id}>
+                      <label htmlFor={`param-${q.id}`}>
+                        {q.question} 
+                        {q.nodeName && <span className="node-badge" style={{ marginLeft: "0.5rem" }}>{q.nodeName}</span>}
+                      </label>
+                      {q.description && <span className="field-desc">{q.description}</span>}
+                      <input
+                        id={`param-${q.id}`}
+                        type={q.type === "password" ? "password" : "text"}
+                        value={formAnswers[q.id] || ""}
+                        placeholder={q.placeholder || `Enter ${q.label}`}
+                        onChange={(e) => {
+                          setFormAnswers((prev) => ({
+                            ...prev,
+                            [q.id]: e.target.value,
+                          }));
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="active-question-actions">
+                  <button className="primary-button" type="submit">
+                    Apply Parameters
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {activeQuestionType === null && (
+              <>
+                <form onSubmit={handleSendChatMessage} className="chat-input-row">
+                  <textarea
+                    className="chat-input-textarea"
+                    value={chatInput}
+                    placeholder={runState === "running" ? "Workflow generation is running..." : "Describe the workflow you want to build... (e.g., Create a stripe payment webhook stored in Postgres)"}
+                    disabled={runState === "running"}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendChatMessage();
+                      }
+                    }}
+                  />
+                  {runState === "running" ? (
+                    <button className="danger-button" type="button" onClick={handleStop} style={{ padding: "0.65rem" }}>
+                      <Square size={16} />
+                    </button>
+                  ) : (
+                    <button className="primary-button" type="submit" disabled={!chatInput.trim()} style={{ padding: "0.65rem" }}>
+                      <Send size={16} />
+                    </button>
+                  )}
+                </form>
+                
+                <div className="chat-input-actions">
+                  <button 
+                    type="button" 
+                    className="advanced-options-toggle"
+                    onClick={() => setShowAdvanced(!showAdvanced)}
+                  >
+                    {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    Advanced Context
+                  </button>
+                  
+                  <button 
+                    type="button" 
+                    className="ghost-button" 
+                    style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
+                    onClick={handleResetSession}
+                  >
+                    <RefreshCw size={12} />
+                    Reset Session
+                  </button>
+                </div>
+
+                {showAdvanced && (
+                  <div className="advanced-options-drawer">
+                    <label>
+                      <span>Integrations & Credentials Context</span>
+                      <textarea
+                        value={integrations}
+                        placeholder="Define integrations or credentials references here..."
+                        onChange={(e) => setIntegrations(e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      <span>Operational Requirements</span>
+                      <textarea
+                        value={requirements}
+                        placeholder="Define custom parameters like retries, validation rules..."
+                        onChange={(e) => setRequirements(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </section>
 
-        <section className="status-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Run</p>
-              <h2>Pipeline</h2>
+        <section className="results-panel">
+          <div className="pipeline-stepper">
+            <div className="pipeline-progress-line">
+              <div 
+                className="pipeline-progress-fill" 
+                style={{ width: `${(activeStage / (STAGES.length - 1)) * 100}%` }}
+              />
             </div>
-            {runState === "running" ? (
-              <Loader2 className="spin" size={22} />
-            ) : (
-              <Activity size={22} />
-            )}
-          </div>
-
-          <div className="stage-list">
             {STAGES.map((stage, index) => {
               const isComplete = runState === "success" || index < activeStage;
               const isActive = runState === "running" && index === activeStage;
               return (
-                <div
-                  className={[
-                    "stage-row",
-                    isComplete ? "complete" : "",
-                    isActive ? "active" : "",
-                  ].join(" ")}
-                  key={stage.label}
+                <div 
+                  key={stage.label} 
+                  className={`pipeline-step ${isComplete ? "complete" : ""} ${isActive ? "active" : ""}`}
                 >
-                  <span className="stage-dot">
-                    {isComplete ? <CheckCircle2 size={15} /> : index + 1}
-                  </span>
-                  <span>{stage.label}</span>
+                  <div className="pipeline-step-dot">
+                    {isComplete ? <CheckCircle2 size={12} /> : index + 1}
+                  </div>
+                  <span className="pipeline-step-label">{stage.label}</span>
                 </div>
               );
             })}
           </div>
 
-          <div className="metric-grid">
-            <div>
-              <span>Events</span>
-              <strong>{events.length}</strong>
-            </div>
-            <div>
-              <span>Nodes</span>
-              <strong>{getWorkflowNodeCount(workflow)}</strong>
-            </div>
-            <div>
-              <span>n8n API</span>
-              <strong>{n8nStatus?.configured ? "Ready" : "Manual"}</strong>
-            </div>
-          </div>
-
-          {statusError ? <p className="notice warning">{statusError}</p> : null}
-          {errorMessage ? (
-            <p className="notice error">
-              <XCircle size={16} />
-              {errorMessage}
-            </p>
-          ) : null}
-          {createdWorkflow ? (
-            <a
-              className="notice success"
-              href={createdWorkflow.url}
-              target="_blank"
-              rel="noreferrer"
-            >
-              <CheckCircle2 size={16} />
-              Created in n8n
-            </a>
-          ) : null}
-        </section>
-
-        <section className="results-panel">
           <div className="results-header">
             <div className="tabs" role="tablist" aria-label="Results">
               <button
@@ -666,22 +989,6 @@ export default function App() {
               >
                 <FileJson size={16} />
                 JSON
-              </button>
-              <button
-                className={activeTab === "clarifications" ? "active" : ""}
-                type="button"
-                onClick={() => setActiveTab("clarifications")}
-              >
-                <HelpCircle size={16} />
-                Clarifications
-              </button>
-              <button
-                className={activeTab === "questions" ? "active" : ""}
-                type="button"
-                onClick={() => setActiveTab("questions")}
-              >
-                <Sliders size={16} />
-                Questions
               </button>
               <button
                 className={activeTab === "audit" ? "active" : ""}
@@ -743,100 +1050,6 @@ export default function App() {
                 </div>
               )
             ) : null}
-            {activeTab === "clarifications" ? (
-              clarifications.length > 0 ? (
-                <div className="setup-questions-form">
-                  <div className="setup-intro">
-                    <p className="setup-description">
-                      The agent needs some extra clarifications to understand your requirements better.
-                      Provide your answers below and click Generate again to refine the workflow.
-                    </p>
-                  </div>
-                  <div className="setup-grid">
-                    {clarifications.map((q) => (
-                      <div className="setup-field-card" key={q.id}>
-                        <div className="field-meta">
-                          <span className="param-badge">{q.clarification_key}</span>
-                        </div>
-                        <label className="setup-label">
-                          <span className="question-text">{q.question}</span>
-                          <input
-                            type="text"
-                            className="setup-input"
-                            value={answers[q.id] || ""}
-                            placeholder="Type clarification here..."
-                            onChange={(e) => {
-                              setAnswers((prev) => ({
-                                ...prev,
-                                [q.id]: e.target.value,
-                              }));
-                            }}
-                          />
-                        </label>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="empty-state">
-                  <HelpCircle size={28} />
-                  <span>
-                    {runState === "success"
-                      ? "No clarification questions were generated. The agent understood your request completely!"
-                      : "Clarification questions will appear here once the needs clarifier agent runs."}
-                  </span>
-                </div>
-              )
-            ) : null}
-            {activeTab === "questions" ? (
-              questions.length > 0 ? (
-                <div className="setup-questions-form">
-                  <div className="setup-intro">
-                    <p className="setup-description">
-                      The agent has detected that the generated workflow requires custom configurations.
-                      Provide your values below to dynamically configure your workflow.
-                    </p>
-                  </div>
-                  <div className="setup-grid">
-                    {questions.map((q) => (
-                      <div className="setup-field-card" key={q.id}>
-                        <div className="field-meta">
-                          {q.nodeName && <span className="node-badge">{q.nodeName}</span>}
-                          <span className="param-badge">{q.parameterName}</span>
-                        </div>
-                        <label className="setup-label">
-                          <span className="question-text">{q.question}</span>
-                          {q.description && (
-                            <span className="field-desc">{q.description}</span>
-                          )}
-                          <input
-                            type={q.type === "password" ? "password" : "text"}
-                            className="setup-input"
-                            value={answers[q.id] || ""}
-                            placeholder={q.placeholder || `Enter ${q.label}`}
-                            onChange={(e) => {
-                              setAnswers((prev) => ({
-                                ...prev,
-                                [q.id]: e.target.value,
-                              }));
-                            }}
-                          />
-                        </label>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="empty-state">
-                  <Sliders size={28} />
-                  <span>
-                    {runState === "success"
-                      ? "No required parameters or credentials were found for this workflow."
-                      : "Questions will appear here once parameter detection runs."}
-                  </span>
-                </div>
-              )
-            ) : null}
             {activeTab === "audit" ? (
               auditMarkdown ? (
                 <pre>{auditMarkdown}</pre>
@@ -856,6 +1069,46 @@ export default function App() {
                   <span>Run events will appear here.</span>
                 </div>
               )
+            ) : null}
+          </div>
+
+          <div style={{ marginTop: "1rem", paddingTop: "1rem", borderTop: "1px solid var(--border-color)", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+            <div className="inline-fields" style={{ marginBottom: 0 }}>
+              <label>
+                <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>Workflow name</span>
+                <input
+                  value={workflowName}
+                  onChange={(event) => setWorkflowName(event.target.value)}
+                  style={{ padding: "0.4rem 0.65rem", fontSize: "0.8rem" }}
+                />
+              </label>
+              <label className="check-row" style={{ marginTop: "1.2rem" }}>
+                <input
+                  type="checkbox"
+                  checked={activateWorkflow}
+                  onChange={(event) => setActivateWorkflow(event.target.checked)}
+                />
+                <span>Activate in n8n</span>
+              </label>
+            </div>
+            
+            {statusError ? <p className="notice warning">{statusError}</p> : null}
+            {errorMessage ? (
+              <p className="notice error">
+                <XCircle size={16} />
+                {errorMessage}
+              </p>
+            ) : null}
+            {createdWorkflow ? (
+              <a
+                className="notice success"
+                href={createdWorkflow.url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <CheckCircle2 size={16} />
+                Created in n8n
+              </a>
             ) : null}
           </div>
         </section>
