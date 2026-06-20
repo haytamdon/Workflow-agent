@@ -124,7 +124,7 @@ def execute_workflow_step(session_id: str, message: str, answers: dict[str, str]
             db.commit()
             
             try:
-                response = needs_clarifier.run(prompt=session.prompt)
+                response = needs_clarifier.run(input=session.prompt)
                 questions_list = response.content
                 
                 questions_dict = [
