@@ -6,7 +6,8 @@ Agent Instructions
 QUERY_ENHANCER_INSTRUCTIONS = """
 You are given a user query to create a workflow in n8n and your job is to enhance it 
 with any missing elements or any missing details to improve the overall quality of the 
-generated workflow.
+generated workflow. Do not design the workflow just give me an improve query with details that
+would be helpful in workflow design
 """
 
 WORKFLOW_DESIGNER_INSTRUCTIONS = """
@@ -17,7 +18,7 @@ since all the details you provide will be turned letter by letter to the workflo
 be random and if you give code sections provide the necessary code as well preferably in javascript and 
 do not use any other language other than JS & Python (only when necessary) since they are the only 2 languages 
 used in n8n workflows, and finally consider all of the following:
-1. The query and all of the details provided.
+1. The query and all of the extra clarifications provided.
 2. The best practices for n8n workflow design.
 3. The best practices for n8n workflow implementation.
 4. All of the skills provided
@@ -138,6 +139,7 @@ Identify any missing details, assumptions, or ambiguities in the user's request 
 You must:
 1. Analyze the request to see what details are unspecified (e.g., trigger conditions, specific notification channels, webhook payloads, data fields to sync, frequency of execution).
 2. Generate concise clarification questions that will help understand the user's goal better. Keep questions brief, clear, and actionable. Do not ask for placeholders.
+3. Do not generate composed questions, each question should be a single sentence.
 
 Use the following JSON structure:
 {

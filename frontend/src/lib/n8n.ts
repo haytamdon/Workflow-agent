@@ -1,5 +1,6 @@
-import { buildAuthHeaders, normalizeBaseUrl } from "./agentos";
+import { buildAuthHeaders, normalizeBaseUrl } from "./workflow_api";
 import type { N8nWorkflow } from "./results";
+
 
 export interface N8nStatus {
   configured: boolean;

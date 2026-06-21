@@ -17,4 +17,6 @@ workflow_creator = Agent(
     add_history_to_context=True,
     num_history_runs=5,
     markdown=False,
+    use_json_mode=True,
 )
+
