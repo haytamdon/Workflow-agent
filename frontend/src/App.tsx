@@ -3,23 +3,28 @@ import {
   Bot,
   Braces,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
+  ChevronLeft,
+  ChevronRight,
   Clipboard,
+  Clock,
   Download,
   ExternalLink,
   FileJson,
   HelpCircle,
+  History,
   Loader2,
+  MessageSquare,
   Moon,
+  PenLine,
   Play,
   RefreshCw,
+  Search,
   Send,
   Settings2,
   Sliders,
   Square,
   Sun,
-  Wand2,
+  Trash2,
   XCircle,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -98,6 +103,113 @@ const EXAMPLES = [
 
 type RunState = "idle" | "running" | "success" | "error";
 type ResultTab = "json" | "audit" | "raw";
+
+interface SavedWorkflow {
+  id: string;
+  name: string;
+  prompt: string;
+  json: string;
+  createdAt: string;
+}
+
+const HISTORY_KEY = "workflow-agent.history";
+
+function loadHistory(): SavedWorkflow[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(history: SavedWorkflow[]) {
+  try {
+    const trimmed = history.slice(-50);
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+// ─── Conversation persistence ───────────────────────────────────────────────
+
+interface MessageSnapshot {
+  id: string;
+  sender: "user" | "bot" | "system";
+  text: string;
+  timestamp: string; // ISO string for serialisation
+}
+
+interface Conversation {
+  id: string;
+  title: string;           // derived from first user message
+  messages: MessageSnapshot[];
+  workflowJson: string;    // last extracted workflow JSON
+  workflowName: string;
+  updatedAt: string;       // ISO string
+  sessionId: string;
+}
+
+const CONV_KEY = "workflow-agent.conversations";
+
+function loadConversations(): Conversation[] {
+  try {
+    const raw = localStorage.getItem(CONV_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistConversations(convs: Conversation[]) {
+  try {
+    // Keep newest 100
+    const trimmed = convs.slice(-100);
+    localStorage.setItem(CONV_KEY, JSON.stringify(trimmed));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+function deriveTitle(messages: MessageSnapshot[]): string {
+  const firstUser = messages.find((m) => m.sender === "user");
+  if (!firstUser) return "New conversation";
+  return firstUser.text.length > 60
+    ? firstUser.text.slice(0, 60) + "…"
+    : firstUser.text;
+}
+
+function groupConversationsByDate(convs: Conversation[]): { label: string; items: Conversation[] }[] {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(today.getTime() - 86400000);
+  const lastWeek = new Date(today.getTime() - 7 * 86400000);
+  const lastMonth = new Date(today.getTime() - 30 * 86400000);
+
+  const todayItems: Conversation[] = [];
+  const yesterdayItems: Conversation[] = [];
+  const lastWeekItems: Conversation[] = [];
+  const lastMonthItems: Conversation[] = [];
+  const olderItems: Conversation[] = [];
+
+  [...convs].reverse().forEach((c) => {
+    const d = new Date(c.updatedAt);
+    if (d >= today) todayItems.push(c);
+    else if (d >= yesterday) yesterdayItems.push(c);
+    else if (d >= lastWeek) lastWeekItems.push(c);
+    else if (d >= lastMonth) lastMonthItems.push(c);
+    else olderItems.push(c);
+  });
+
+  return [
+    { label: "Today", items: todayItems },
+    { label: "Yesterday", items: yesterdayItems },
+    { label: "This Week", items: lastWeekItems },
+    { label: "This Month", items: lastMonthItems },
+    { label: "Older", items: olderItems },
+  ].filter((g) => g.items.length > 0);
+}
 
 function renderMessageText(text: string, handleDownloadJson?: () => void, displayJson?: string) {
   if (!text) return null;
@@ -260,11 +372,19 @@ export default function App() {
   );
   const [sessionId, setSessionId] = useState(createSessionId);
   const [prompt, setPrompt] = useState(EXAMPLES[0].prompt);
-  const [integrations, setIntegrations] = useState(EXAMPLES[0].details);
-  const [requirements, setRequirements] = useState(
+  const [integrations] = useState(EXAMPLES[0].details);
+  const [requirements] = useState(
     "Use n8n credential references for secrets, include error handling, and keep the workflow importable without manual JSON edits.",
   );
   const [workflowName, setWorkflowName] = useState("Generated workflow");
+  const [savedWorkflows, setSavedWorkflows] = useState<SavedWorkflow[]>(loadHistory);
+  const [showHistory, setShowHistory] = useState(false);
+
+  // ── Conversations sidebar state
+  const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
+  const [currentConvId, setCurrentConvId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [convSearch, setConvSearch] = useState("");
   const [activateWorkflow, setActivateWorkflow] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [runState, setRunState] = useState<RunState>("idle");
@@ -322,7 +442,6 @@ export default function App() {
     },
   ]);
   const [chatInput, setChatInput] = useState("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
   
   const abortRef = useRef<AbortController | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -379,6 +498,55 @@ export default function App() {
     () => getCreateWorkflowState(n8nStatus, modifiedWorkflow, isCreating),
     [isCreating, n8nStatus, modifiedWorkflow],
   );
+
+  // ── Auto-save current conversation whenever messages change
+  useEffect(() => {
+    const nonWelcome = messages.filter((m) => m.id !== "welcome");
+    if (nonWelcome.length === 0) return; // nothing to save yet
+
+    const snapshots: MessageSnapshot[] = messages.map((m) => ({
+      id: m.id,
+      sender: m.sender,
+      text: m.text,
+      timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : String(m.timestamp),
+    }));
+
+    setConversations((prev) => {
+      const existing = prev.find((c) => c.id === currentConvId);
+      let updated: Conversation[];
+      if (existing) {
+        updated = prev.map((c) =>
+          c.id === currentConvId
+            ? {
+                ...c,
+                title: deriveTitle(snapshots),
+                messages: snapshots,
+                workflowJson: displayJson || c.workflowJson,
+                workflowName: workflowName || c.workflowName,
+                updatedAt: new Date().toISOString(),
+              }
+            : c
+        );
+      } else {
+        // Brand-new conversation — create an entry
+        const newId = `conv-${Date.now()}`;
+        setCurrentConvId(newId);
+        const newConv: Conversation = {
+          id: newId,
+          title: deriveTitle(snapshots),
+          messages: snapshots,
+          workflowJson: displayJson || "",
+          workflowName: workflowName || "Generated workflow",
+          updatedAt: new Date().toISOString(),
+          sessionId,
+        };
+        updated = [...prev, newConv];
+      }
+      persistConversations(updated);
+      return updated;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages]);
 
   useEffect(() => {
     writeStoredValue("workflow-agent.agentos", agentosBaseUrl);
@@ -535,6 +703,22 @@ export default function App() {
       setExtraction(finalExtraction);
       setActiveStage(STAGES.length - 1);
       setRunState("success");
+
+      // Persist workflow to history if JSON was extracted
+      if (finalExtraction.workflow) {
+        const entry: SavedWorkflow = {
+          id: `wf-${Date.now()}`,
+          name: workflowName || "Generated workflow",
+          prompt: currentPrompt,
+          json: JSON.stringify(finalExtraction.workflow, null, 2),
+          createdAt: new Date().toISOString(),
+        };
+        setSavedWorkflows((prev) => {
+          const next = [...prev, entry];
+          saveHistory(next);
+          return next;
+        });
+      }
 
       const finalClarifications = extractClarifications(finalRaw);
       const finalQuestions = extractQuestions(finalRaw);
@@ -740,8 +924,9 @@ export default function App() {
   }
 
 
-  function handleResetSession() {
+  function startNewConversation() {
     abortRef.current?.abort();
+    setCurrentConvId(null);
     setSessionId(createSessionId());
     setPrompt("");
     setAnswers({});
@@ -755,6 +940,7 @@ export default function App() {
     setRunState("idle");
     setActiveStage(0);
     setDbLogs([]);
+    setWorkflowName("Generated workflow");
     setMessages([
       {
         id: "welcome",
@@ -765,13 +951,69 @@ export default function App() {
     ]);
   }
 
+  function handleResetSession() {
+    startNewConversation();
+  }
+
+  function handleLoadConversation(conv: Conversation) {
+    abortRef.current?.abort();
+    setCurrentConvId(conv.id);
+    setWorkflowName(conv.workflowName || "Generated workflow");
+    // Restore messages
+    setMessages(
+      conv.messages.map((m) => ({
+        ...m,
+        timestamp: new Date(m.timestamp),
+      }))
+    );
+    // Restore workflow if present
+    if (conv.workflowJson) {
+      try {
+        const parsed = JSON.parse(conv.workflowJson);
+        setExtraction({
+          workflow: parsed,
+          formattedJson: conv.workflowJson,
+          source: "direct" as const,
+        });
+        setRunState("success");
+        setActiveTab("json");
+      } catch {
+        setExtraction(extractWorkflowJson(""));
+        setRunState("idle");
+      }
+    } else {
+      setExtraction(extractWorkflowJson(""));
+      setRunState("idle");
+    }
+    setRawOutput("");
+    setAuditMarkdown("");
+    setErrorMessage("");
+    setCreatedWorkflow(null);
+    setActiveStage(0);
+    setDbLogs([]);
+    setAnswers({});
+    setFormAnswers({});
+    setActiveQuestionType(null);
+  }
+
+  function handleDeleteConversation(id: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    setConversations((prev) => {
+      const next = prev.filter((c) => c.id !== id);
+      persistConversations(next);
+      return next;
+    });
+    if (id === currentConvId) {
+      startNewConversation();
+    }
+  }
+
   function handleStop() {
     abortRef.current?.abort();
   }
 
   function applyExample(example: (typeof EXAMPLES)[number]) {
     setPrompt(example.prompt);
-    setIntegrations(example.details);
     setWorkflowName(example.title);
     setAnswers({});
     setFormAnswers({});
@@ -851,45 +1093,184 @@ export default function App() {
     }
   }
 
+  function handleLoadHistory(saved: SavedWorkflow) {
+    setShowHistory(false);
+    setWorkflowName(saved.name);
+    const parsedWorkflow = JSON.parse(saved.json);
+    setExtraction({
+      workflow: parsedWorkflow,
+      formattedJson: saved.json,
+      source: "direct" as const,
+    });
+    setActiveTab("json");
+    setRunState("success");
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `sys-history-${Date.now()}`,
+        sender: "system" as const,
+        text: `Loaded saved workflow: "${saved.name}"`,
+        timestamp: new Date(),
+      },
+    ]);
+  }
+
+  function handleDeleteHistory(id: string) {
+    setSavedWorkflows((prev) => {
+      const next = prev.filter((w) => w.id !== id);
+      saveHistory(next);
+      return next;
+    });
+  }
+
+  const filteredConversations = useMemo(() => {
+    if (!convSearch.trim()) return conversations;
+    const q = convSearch.toLowerCase();
+    return conversations.filter(
+      (c) => c.title.toLowerCase().includes(q)
+    );
+  }, [conversations, convSearch]);
+
+  const groupedConversations = useMemo(
+    () => groupConversationsByDate(filteredConversations),
+    [filteredConversations]
+  );
+
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand-mark" aria-hidden="true">
-          <Bot size={24} />
-        </div>
-        <div className="brand-copy">
-          <h1>Workflow Agent</h1>
-          <span>Workflow API to n8n</span>
+    <div className={`app-root${sidebarOpen ? " sidebar-open" : " sidebar-closed"}`}>
+      {/* ── Sidebar ── */}
+      <aside className={`conv-sidebar${sidebarOpen ? " open" : " closed"}`}>
+        <div className="conv-sidebar-header">
+          <div className="conv-sidebar-brand">
+            <Bot size={20} style={{ color: "var(--color-primary)" }} />
+            <span>Workflow Agent</span>
+          </div>
+          <button
+            className="icon-button compact"
+            type="button"
+            title="Collapse sidebar"
+            onClick={() => setSidebarOpen(false)}
+          >
+            <ChevronLeft size={16} />
+          </button>
         </div>
 
-        <div className="topbar-actions">
-          <button
-            className="icon-button"
-            type="button"
-            title={theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
-            onClick={() => setTheme((curr) => (curr === "dark" ? "light" : "dark"))}
-          >
-            {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
-          </button>
-          <a
-            className="ghost-button"
-            href={n8nBaseUrl}
-            target="_blank"
-            rel="noreferrer"
-          >
-            <ExternalLink size={16} />
-            n8n
-          </a>
-          <button
-            className="icon-button"
-            type="button"
-            title="Settings"
-            onClick={() => setShowSettings((value) => !value)}
-          >
-            <Settings2 size={18} />
-          </button>
+        <button
+          className="new-chat-button"
+          type="button"
+          onClick={startNewConversation}
+        >
+          <PenLine size={15} />
+          New conversation
+        </button>
+
+        <div className="conv-search-wrap">
+          <Search size={13} className="conv-search-icon" />
+          <input
+            type="text"
+            className="conv-search-input"
+            placeholder="Search conversations…"
+            value={convSearch}
+            onChange={(e) => setConvSearch(e.target.value)}
+          />
         </div>
-      </header>
+
+        <div className="conv-list">
+          {groupedConversations.length === 0 && (
+            <div className="conv-empty">
+              <MessageSquare size={24} style={{ opacity: 0.35 }} />
+              <span>{convSearch ? "No results" : "No conversations yet"}</span>
+            </div>
+          )}
+          {groupedConversations.map((group) => (
+            <div key={group.label} className="conv-group">
+              <div className="conv-group-label">{group.label}</div>
+              {group.items.map((conv) => (
+                <button
+                  key={conv.id}
+                  type="button"
+                  className={`conv-item${conv.id === currentConvId ? " active" : ""}`}
+                  onClick={() => handleLoadConversation(conv)}
+                  title={conv.title}
+                >
+                  <MessageSquare size={13} className="conv-item-icon" />
+                  <span className="conv-item-title">{conv.title}</span>
+                  <button
+                    type="button"
+                    className="conv-item-delete"
+                    title="Delete"
+                    onClick={(e) => handleDeleteConversation(conv.id, e)}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      {/* ── Collapsed sidebar toggle ── */}
+      {!sidebarOpen && (
+        <button
+          className="sidebar-reopen-btn"
+          type="button"
+          title="Open sidebar"
+          onClick={() => setSidebarOpen(true)}
+        >
+          <ChevronRight size={18} />
+        </button>
+      )}
+
+      <main className="app-shell">
+        <header className="topbar">
+          <div className="brand-mark" aria-hidden="true">
+            <Bot size={24} />
+          </div>
+          <div className="brand-copy">
+            <h1>Workflow Agent</h1>
+            <span>Workflow API to n8n</span>
+          </div>
+
+          <div className="topbar-actions">
+            <button
+              className={`icon-button${showHistory ? " active" : ""}`}
+              type="button"
+              title="Workflow History"
+              onClick={() => setShowHistory((v) => !v)}
+            >
+              <History size={18} />
+              {savedWorkflows.length > 0 && (
+                <span className="history-badge">{savedWorkflows.length}</span>
+              )}
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              title={theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode"}
+              onClick={() => setTheme((curr) => (curr === "dark" ? "light" : "dark"))}
+            >
+              {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+            </button>
+            <a
+              className="ghost-button"
+              href={n8nBaseUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <ExternalLink size={16} />
+              n8n
+            </a>
+            <button
+              className="icon-button"
+              type="button"
+              title="Settings"
+              onClick={() => setShowSettings((value) => !value)}
+            >
+              <Settings2 size={18} />
+            </button>
+          </div>
+        </header>
 
       {showSettings ? (
         <section className="settings-band" aria-label="Settings">
@@ -925,6 +1306,58 @@ export default function App() {
           </label>
         </section>
       ) : null}
+
+      {showHistory && (
+        <aside className="history-panel" aria-label="Workflow History">
+          <div className="history-panel-header">
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <History size={16} style={{ color: "var(--color-primary)" }} />
+              <span className="history-panel-title">Saved Workflows</span>
+            </div>
+            <button
+              className="icon-button compact"
+              type="button"
+              onClick={() => setShowHistory(false)}
+              title="Close History"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
+          <div className="history-list">
+            {savedWorkflows.length === 0 ? (
+              <div className="history-empty">
+                <Clock size={24} style={{ opacity: 0.4 }} />
+                <span>No saved workflows yet. Generate one to get started!</span>
+              </div>
+            ) : (
+              [...savedWorkflows].reverse().map((wf) => (
+                <div key={wf.id} className="history-item">
+                  <button
+                    className="history-item-main"
+                    type="button"
+                    onClick={() => handleLoadHistory(wf)}
+                  >
+                    <div className="history-item-name">{wf.name}</div>
+                    <div className="history-item-prompt">{wf.prompt.slice(0, 80)}{wf.prompt.length > 80 ? "…" : ""}</div>
+                    <div className="history-item-date">
+                      <Clock size={11} />
+                      {new Date(wf.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                    </div>
+                  </button>
+                  <button
+                    className="history-item-delete icon-button compact"
+                    type="button"
+                    title="Delete"
+                    onClick={() => handleDeleteHistory(wf.id)}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </aside>
+      )}
 
       <section className="workspace">
         <section className="chat-panel">
@@ -1149,15 +1582,6 @@ export default function App() {
                 <div className="chat-input-actions">
                   <button 
                     type="button" 
-                    className="advanced-options-toggle"
-                    onClick={() => setShowAdvanced(!showAdvanced)}
-                  >
-                    {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                    Advanced Context
-                  </button>
-                  
-                  <button 
-                    type="button" 
                     className="ghost-button" 
                     style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
                     onClick={handleResetSession}
@@ -1166,27 +1590,6 @@ export default function App() {
                     Reset Session
                   </button>
                 </div>
-
-                {showAdvanced && (
-                  <div className="advanced-options-drawer">
-                    <label>
-                      <span>Integrations & Credentials Context</span>
-                      <textarea
-                        value={integrations}
-                        placeholder="Define integrations or credentials references here..."
-                        onChange={(e) => setIntegrations(e.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>Operational Requirements</span>
-                      <textarea
-                        value={requirements}
-                        placeholder="Define custom parameters like retries, validation rules..."
-                        onChange={(e) => setRequirements(e.target.value)}
-                      />
-                    </label>
-                  </div>
-                )}
               </>
             )}
           </div>
@@ -1388,6 +1791,7 @@ export default function App() {
           </div>
         </section>
       </section>
-    </main>
+      </main>
+    </div>
   );
 }
