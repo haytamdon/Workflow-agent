@@ -648,9 +648,32 @@ textarea {
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 3rem 1.5rem;
+  padding: 4rem 2rem;
   color: var(--text-muted);
-  gap: 0.5rem;
+  background: rgba(255, 255, 255, 0.015);
+  border: 1px dashed var(--border-color);
+  border-radius: 12px;
+  gap: 0.75rem;
+  margin: 1rem;
+  transition: all var(--transition-normal);
+}
+
+.theme-light .empty-state {
+  background: rgba(0, 0, 0, 0.005);
+}
+
+.empty-state svg {
+  color: var(--color-primary);
+  opacity: 0.6;
+  filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.25));
+  animation: float 4s ease-in-out infinite;
+}
+
+.empty-state span {
+  font-size: 0.825rem;
+  font-weight: 500;
+  max-width: 280px;
+  line-height: 1.4;
 }
 
 /* Setup Questions Form Styling */
@@ -1122,7 +1145,9 @@ textarea {
   font-weight: 500;
   color: var(--text-muted);
   text-align: center;
-  white-space: nowrap;
+  white-space: normal;
+  max-width: 60px;
+  line-height: 1.25;
 }
 
 .pipeline-step.complete .pipeline-step-label {
@@ -1192,4 +1217,115 @@ textarea {
   background: #f8fafc;
   color: #0f172a;
 }
+
+/* Download Card CSS */
+.download-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  gap: 1rem;
+  margin: 0.5rem 0;
+  max-width: 550px;
+  width: 100%;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-fast) ease-in-out;
+}
+
+.theme-light .download-card {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.download-card:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.theme-light .download-card:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.download-card-icon-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: var(--color-primary);
+  flex-shrink: 0;
+}
+
+.download-card-details {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.download-card-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.download-card-subtitle {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.download-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.download-card-button {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  padding: 0.4rem 0.85rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  transition: all var(--transition-fast);
+}
+
+.download-card-button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--text-secondary);
+}
+
+.theme-light .download-card-button:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+/* Animated Stage Loader */
+.stage-loader {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  color: var(--text-secondary);
+}
+
+.stage-loader-spinner {
+  color: var(--color-primary);
+  animation: spin 1s linear infinite;
+}
+
+.stage-loader-text {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
 

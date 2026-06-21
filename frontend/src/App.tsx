@@ -99,8 +99,42 @@ const EXAMPLES = [
 type RunState = "idle" | "running" | "success" | "error";
 type ResultTab = "json" | "audit" | "raw";
 
-function renderMessageText(text: string) {
+function renderMessageText(text: string, handleDownloadJson?: () => void, displayJson?: string) {
   if (!text) return null;
+  if (text.startsWith("[RUNNING_STAGE]")) {
+    const stage = text.replace("[RUNNING_STAGE]", "").trim();
+    return (
+      <div className="stage-loader">
+        <Loader2 className="stage-loader-spinner spin" size={16} style={{ animation: "spin 1s linear infinite" }} />
+        <span className="stage-loader-text">Running: {stage}...</span>
+      </div>
+    );
+  }
+  if (text.startsWith("[DOWNLOAD_WORKFLOW]")) {
+    const name = text.replace("[DOWNLOAD_WORKFLOW]", "").trim() || "Generated n8n Workflow";
+    return (
+      <div className="download-card">
+        <div className="download-card-icon-container">
+          <FileJson size={22} />
+        </div>
+        <div className="download-card-details">
+          <div className="download-card-title">{name}</div>
+          <div className="download-card-subtitle">n8n Workflow · JSON</div>
+        </div>
+        <div className="download-card-actions">
+          <button 
+            type="button" 
+            className="download-card-button"
+            onClick={handleDownloadJson}
+            disabled={!displayJson}
+          >
+            <Download size={14} />
+            Download
+          </button>
+        </div>
+      </div>
+    );
+  }
   const parts = text.split(/(```[\s\S]*?```)/g);
   return parts.map((part, index) => {
     if (part.startsWith("```")) {
@@ -141,6 +175,7 @@ function renderMessageText(text: string) {
     return <span key={index}>{lines}</span>;
   });
 }
+
 
 function createSessionId(): string {
   return `workflow-ui-${Date.now().toString(36)}`;
@@ -250,6 +285,31 @@ export default function App() {
   const [isCreating, setIsCreating] = useState(false);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [dbLogs, setDbLogs] = useState<any[]>([]);
+  const [activeQuestionType, setActiveQuestionType] = useState<"clarifications" | "parameters" | null>(null);
+  const [formAnswers, setFormAnswers] = useState<Record<string, string>>({});
+  const [currentClarificationIndex, setCurrentClarificationIndex] = useState(0);
+  const [currentParameterIndex, setCurrentParameterIndex] = useState(0);
+
+  useEffect(() => {
+    setCurrentClarificationIndex(0);
+    setCurrentParameterIndex(0);
+  }, [activeQuestionType]);
+
+  const activeBotMsgIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (runState === "running" && activeBotMsgIdRef.current) {
+      const stageLabel = STAGES[activeStage]?.label || "Processing";
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === activeBotMsgIdRef.current
+            ? { ...msg, text: `[RUNNING_STAGE] ${stageLabel}` }
+            : msg
+        )
+      );
+    }
+  }, [activeStage, runState]);
+
 
   
   // Chatbot state
@@ -263,8 +323,6 @@ export default function App() {
   ]);
   const [chatInput, setChatInput] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [activeQuestionType, setActiveQuestionType] = useState<"clarifications" | "parameters" | null>(null);
-  const [formAnswers, setFormAnswers] = useState<Record<string, string>>({});
   
   const abortRef = useRef<AbortController | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -401,6 +459,7 @@ export default function App() {
     overrideIntegrations?: string,
     overrideAnswers?: Record<string, string>
   ) {
+    activeBotMsgIdRef.current = botMsgId;
     abortRef.current?.abort();
     const abortController = new AbortController();
     abortRef.current = abortController;
@@ -458,11 +517,6 @@ export default function App() {
           
           if (event.text) {
             accumulatedText += event.text;
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === botMsgId ? { ...msg, text: accumulatedText } : msg
-              )
-            );
           }
           setActiveStage((current) => getStageIndexFromText(event.text, current));
         },
@@ -473,7 +527,7 @@ export default function App() {
         accumulatedText ||
         formatRawEvents(response.events.length ? response.events : eventBuffer);
       const finalExtraction = extractWorkflowJson(
-        finalRaw || response.payload || response.events,
+          finalRaw || response.payload || response.events
       );
 
       setRawOutput(finalRaw);
@@ -481,12 +535,6 @@ export default function App() {
       setExtraction(finalExtraction);
       setActiveStage(STAGES.length - 1);
       setRunState("success");
-
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === botMsgId ? { ...msg, text: finalRaw } : msg
-        )
-      );
 
       const finalClarifications = extractClarifications(finalRaw);
       const finalQuestions = extractQuestions(finalRaw);
@@ -500,15 +548,25 @@ export default function App() {
         });
         setFormAnswers(initialFormAnswers);
         
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `sys-clarify-${Date.now()}`,
-            sender: "system",
-            text: "Clarification questions require response in the bottom input box.",
-            timestamp: new Date(),
-          },
-        ]);
+        setMessages((prev) => {
+          const next = prev.map((msg) =>
+            msg.id === botMsgId
+              ? {
+                  ...msg,
+                  text: "I need a few clarifications to proceed with designing your workflow. Please answer the questions below.",
+                }
+              : msg
+          );
+          return [
+            ...next,
+            {
+              id: `sys-clarify-${Date.now()}`,
+              sender: "system",
+              text: "Clarification questions require response in the bottom input box.",
+              timestamp: new Date(),
+            },
+          ];
+        });
       } else if (finalQuestions.length > 0) {
         setActiveTab("json");
         setActiveQuestionType("parameters");
@@ -518,30 +576,47 @@ export default function App() {
         });
         setFormAnswers(initialFormAnswers);
 
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `sys-params-${Date.now()}`,
-            sender: "system",
-            text: "Workflow configuration parameters require values in the bottom input box.",
-            timestamp: new Date(),
-          },
-        ]);
+        setMessages((prev) => {
+          const next = prev.map((msg) =>
+            msg.id === botMsgId
+              ? {
+                  ...msg,
+                  text: "I have detected some parameters in the workflow that need configuration. Please configure them below.",
+                }
+              : msg
+          );
+          return [
+            ...next,
+            {
+              id: `sys-params-${Date.now()}`,
+              sender: "system",
+              text: "Workflow configuration parameters require values in the bottom input box.",
+              timestamp: new Date(),
+            },
+          ];
+        });
       } else {
         if (finalExtraction.workflow) {
           setActiveTab("json");
         } else {
           setActiveTab("raw");
         }
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `sys-success-${Date.now()}`,
-            sender: "system",
-            text: "Workflow generated successfully! Review, copy, and create it in n8n on the right panel.",
-            timestamp: new Date(),
-          },
-        ]);
+        setMessages((prev) => {
+          const next = prev.map((msg) =>
+            msg.id === botMsgId
+              ? { ...msg, text: `[DOWNLOAD_WORKFLOW] ${workflowName || "Generated workflow"}` }
+              : msg
+          );
+          return [
+            ...next,
+            {
+              id: `sys-success-${Date.now()}`,
+              sender: "system",
+              text: "Workflow generated successfully! Review, copy, and create it in n8n on the right panel.",
+              timestamp: new Date(),
+            },
+          ];
+        });
       }
     } catch (error) {
       let errorText = "";
@@ -557,7 +632,7 @@ export default function App() {
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === botMsgId
-            ? { ...msg, text: msg.text + `\n\n**Error:** ${errorText}` }
+            ? { ...msg, text: `Generation failed. Error: ${errorText}` }
             : msg
         )
       );
@@ -679,6 +754,7 @@ export default function App() {
     setCreatedWorkflow(null);
     setRunState("idle");
     setActiveStage(0);
+    setDbLogs([]);
     setMessages([
       {
         id: "welcome",
@@ -820,6 +896,7 @@ export default function App() {
           <label>
             <span>Workflow API URL</span>
             <input
+              type="text"
               value={agentosBaseUrl}
               onChange={(event) => setAgentosBaseUrl(event.target.value)}
             />
@@ -828,13 +905,14 @@ export default function App() {
           <label>
             <span>n8n URL</span>
             <input
+              type="text"
               value={n8nBaseUrl}
               onChange={(event) => setN8nBaseUrl(event.target.value)}
             />
           </label>
           <label>
             <span>User ID</span>
-            <input value={userId} onChange={(event) => setUserId(event.target.value)} />
+            <input type="text" value={userId} onChange={(event) => setUserId(event.target.value)} />
           </label>
           <label>
             <span>Bearer token</span>
@@ -862,7 +940,8 @@ export default function App() {
                   {msg.sender === "system" ? (
                     <span style={{ fontStyle: "italic", fontSize: "0.8rem" }}>{msg.text}</span>
                   ) : (
-                    renderMessageText(msg.text)
+                    renderMessageText(msg.text, handleDownloadJson, displayJson)
+
                   )}
                 </div>
               </div>
@@ -871,73 +950,171 @@ export default function App() {
           </div>
 
           <div className="chat-input-container">
-            {activeQuestionType === "clarifications" && (
+            {activeQuestionType === "clarifications" && clarifications.length > 0 && (
               <form onSubmit={handleClarificationSubmit} className="active-question-form">
                 <div className="active-question-header">
-                  <span className="active-question-title">Clarifications Required</span>
+                  <span className="active-question-title">
+                    Clarifications ({currentClarificationIndex + 1} of {clarifications.length})
+                  </span>
                   <HelpCircle size={16} style={{ color: "var(--color-primary)" }} />
                 </div>
                 <div className="active-question-fields">
-                  {clarifications.map((q) => (
-                    <div className="active-question-field" key={q.id}>
-                      <label htmlFor={`clarify-${q.id}`}>{q.question}</label>
-                      <input
-                        id={`clarify-${q.id}`}
-                        type="text"
-                        value={formAnswers[q.id] || ""}
-                        placeholder="Type clarification here..."
-                        onChange={(e) => {
-                          setFormAnswers((prev) => ({
-                            ...prev,
-                            [q.id]: e.target.value,
-                          }));
-                        }}
-                      />
-                    </div>
-                  ))}
+                  {(() => {
+                    const q = clarifications[currentClarificationIndex];
+                    if (!q) return null;
+                    return (
+                      <div className="active-question-field" key={q.id}>
+                        <label htmlFor={`clarify-${q.id}`}>{q.question}</label>
+                        <input
+                          id={`clarify-${q.id}`}
+                          type="text"
+                          value={formAnswers[q.id] || ""}
+                          placeholder="Type clarification here..."
+                          autoFocus
+                          onChange={(e) => {
+                            setFormAnswers((prev) => ({
+                              ...prev,
+                              [q.id]: e.target.value,
+                            }));
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              if (currentClarificationIndex < clarifications.length - 1) {
+                                if (formAnswers[q.id]?.trim()) {
+                                  setCurrentClarificationIndex((curr) => curr + 1);
+                                }
+                              } else {
+                                if (formAnswers[q.id]?.trim()) {
+                                  handleClarificationSubmit(e);
+                                }
+                              }
+                            }
+                          }}
+                        />
+                      </div>
+                    );
+                  })()}
                 </div>
-                <div className="active-question-actions">
-                  <button className="primary-button" type="submit">
-                    <Send size={14} />
-                    Submit Answers
-                  </button>
+                <div className="active-question-actions" style={{ display: "flex", justifyContent: "space-between", width: "100%", gap: "0.5rem" }}>
+                  <div>
+                    {currentClarificationIndex > 0 && (
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => setCurrentClarificationIndex((curr) => curr - 1)}
+                      >
+                        Back
+                      </button>
+                    )}
+                  </div>
+                  <div>
+                    {currentClarificationIndex < clarifications.length - 1 ? (
+                      <button
+                        className="primary-button"
+                        type="button"
+                        disabled={!formAnswers[clarifications[currentClarificationIndex]?.id]?.trim()}
+                        onClick={() => setCurrentClarificationIndex((curr) => curr + 1)}
+                      >
+                        Next
+                      </button>
+                    ) : (
+                      <button
+                        className="primary-button"
+                        type="submit"
+                        disabled={!formAnswers[clarifications[currentClarificationIndex]?.id]?.trim()}
+                      >
+                        <Send size={14} />
+                        Submit Answers
+                      </button>
+                    )}
+                  </div>
                 </div>
               </form>
             )}
 
-            {activeQuestionType === "parameters" && (
+            {activeQuestionType === "parameters" && questions.length > 0 && (
               <form onSubmit={handleParametersApply} className="active-question-form">
                 <div className="active-question-header">
-                  <span className="active-question-title">Configure Parameters</span>
+                  <span className="active-question-title">
+                    Parameters ({currentParameterIndex + 1} of {questions.length})
+                  </span>
                   <Sliders size={16} style={{ color: "var(--color-primary)" }} />
                 </div>
                 <div className="active-question-fields">
-                  {questions.map((q) => (
-                    <div className="active-question-field" key={q.id}>
-                      <label htmlFor={`param-${q.id}`}>
-                        {q.question} 
-                        {q.nodeName && <span className="node-badge" style={{ marginLeft: "0.5rem" }}>{q.nodeName}</span>}
-                      </label>
-                      {q.description && <span className="field-desc">{q.description}</span>}
-                      <input
-                        id={`param-${q.id}`}
-                        type={q.type === "password" ? "password" : "text"}
-                        value={formAnswers[q.id] || ""}
-                        placeholder={q.placeholder || `Enter ${q.label}`}
-                        onChange={(e) => {
-                          setFormAnswers((prev) => ({
-                            ...prev,
-                            [q.id]: e.target.value,
-                          }));
-                        }}
-                      />
-                    </div>
-                  ))}
+                  {(() => {
+                    const q = questions[currentParameterIndex];
+                    if (!q) return null;
+                    return (
+                      <div className="active-question-field" key={q.id}>
+                        <label htmlFor={`param-${q.id}`}>
+                          {q.question} 
+                          {q.nodeName && <span className="node-badge" style={{ marginLeft: "0.5rem" }}>{q.nodeName}</span>}
+                        </label>
+                        {q.description && <span className="field-desc">{q.description}</span>}
+                        <input
+                          id={`param-${q.id}`}
+                          type={q.type === "password" ? "password" : "text"}
+                          value={formAnswers[q.id] || ""}
+                          placeholder={q.placeholder || `Enter ${q.label}`}
+                          autoFocus
+                          onChange={(e) => {
+                            setFormAnswers((prev) => ({
+                              ...prev,
+                              [q.id]: e.target.value,
+                            }));
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              if (currentParameterIndex < questions.length - 1) {
+                                if (formAnswers[q.id]?.trim()) {
+                                  setCurrentParameterIndex((curr) => curr + 1);
+                                }
+                              } else {
+                                if (formAnswers[q.id]?.trim()) {
+                                  handleParametersApply(e);
+                                }
+                              }
+                            }
+                          }}
+                        />
+                      </div>
+                    );
+                  })()}
                 </div>
-                <div className="active-question-actions">
-                  <button className="primary-button" type="submit">
-                    Apply Parameters
-                  </button>
+                <div className="active-question-actions" style={{ display: "flex", justifyContent: "space-between", width: "100%", gap: "0.5rem" }}>
+                  <div>
+                    {currentParameterIndex > 0 && (
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => setCurrentParameterIndex((curr) => curr - 1)}
+                      >
+                        Back
+                      </button>
+                    )}
+                  </div>
+                  <div>
+                    {currentParameterIndex < questions.length - 1 ? (
+                      <button
+                        className="primary-button"
+                        type="button"
+                        disabled={!formAnswers[questions[currentParameterIndex]?.id]?.trim()}
+                        onClick={() => setCurrentParameterIndex((curr) => curr + 1)}
+                      >
+                        Next
+                      </button>
+                    ) : (
+                      <button
+                        className="primary-button"
+                        type="submit"
+                        disabled={!formAnswers[questions[currentParameterIndex]?.id]?.trim()}
+                      >
+                        Apply Parameters
+                      </button>
+                    )}
+                  </div>
                 </div>
               </form>
             )}
@@ -1174,6 +1351,7 @@ export default function App() {
               <label>
                 <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>Workflow name</span>
                 <input
+                  type="text"
                   value={workflowName}
                   onChange={(event) => setWorkflowName(event.target.value)}
                   style={{ padding: "0.4rem 0.65rem", fontSize: "0.8rem" }}
