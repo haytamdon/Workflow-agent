@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Generator
 from ai_api.db.session import (
     get_db_session,
@@ -19,6 +20,84 @@ def yield_text(text: str, event_type: str = "message") -> str:
     """Format SSE response payload."""
     payload = {"content": text}
     return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+
+def extract_json(raw: str) -> dict | list:
+    """Robustly extract a JSON object or array from an LLM response string.
+
+    Tries four strategies in order:
+    1. Direct json.loads (model returned clean JSON).
+    2. ```json ... ``` fenced code block.
+    3. Plain ``` ... ``` fenced code block.
+    4. First balanced { ... } or [ ... ] block anywhere in the string.
+
+    Raises ValueError if none succeed.
+    """
+    if not isinstance(raw, str):
+        # Already parsed (e.g. agno returned a dict directly)
+        return raw
+
+    # Strip leading/trailing whitespace and common thinking tags
+    text = raw.strip()
+    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL).strip()
+
+    # Strategy 1: direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: ```json fence
+    m = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: plain ``` fence
+    m = re.search(r"```\s*(.*?)\s*```", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 4: find the first balanced { } or [ ] block
+    for start_char, end_char in (("{" , "}"), ("[", "]")):
+        start = text.find(start_char)
+        if start == -1:
+            continue
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i, ch in enumerate(text[start:], start):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\" and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == start_char:
+                depth += 1
+            elif ch == end_char:
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break  # try next start character
+
+    raise ValueError(
+        f"Failed to parse JSON output. "
+        f"Raw response (first 500 chars): {raw[:500]!r}"
+    )
 
 
 def execute_workflow_step(session_id: str, message: str, answers: dict[str, str]) -> Generator[str, None, None]:
@@ -84,17 +163,7 @@ def execute_workflow_step(session_id: str, message: str, answers: dict[str, str]
             
             try:
                 response = workflow_creator.run(creator_prompt)
-                final_json_str = response.content
-                
-                try:
-                    final_json = json.loads(final_json_str)
-                except Exception:
-                    import re
-                    match = re.search(r"```json\s*(.*?)\s*```", final_json_str, re.DOTALL)
-                    if match:
-                        final_json = json.loads(match.group(1))
-                    else:
-                        raise ValueError("Failed to parse JSON output")
+                final_json = extract_json(response.content)
                 
                 session.status = "final_workflow_completed"
                 log_step.status = "completed"
@@ -245,17 +314,7 @@ def execute_workflow_step(session_id: str, message: str, answers: dict[str, str]
             
             try:
                 response = workflow_creator.run(design)
-                creator_json_str = response.content
-                
-                try:
-                    workflow_json = json.loads(creator_json_str)
-                except Exception:
-                    import re
-                    match = re.search(r"```json\s*(.*?)\s*```", creator_json_str, re.DOTALL)
-                    if match:
-                        workflow_json = json.loads(match.group(1))
-                    else:
-                        raise ValueError("Failed to parse JSON output")
+                workflow_json = extract_json(response.content)
                 
                 session.status = "workflow_creator_completed"
                 log_step.status = "completed"
